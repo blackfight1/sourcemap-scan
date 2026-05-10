@@ -39,6 +39,7 @@ func (s *Service) Run(ctx context.Context) error {
 	var workerWG sync.WaitGroup
 	var successCount atomic.Int64
 	var failureCount atomic.Int64
+	var startedCount atomic.Int64
 
 	for i := 0; i < s.cfg.TargetWorkers; i++ {
 		workerWG.Add(1)
@@ -49,13 +50,44 @@ func (s *Service) Run(ctx context.Context) error {
 					return
 				}
 
+				current := startedCount.Add(1)
+				total := int64(len(s.cfg.Targets))
+				fmt.Fprintf(
+					os.Stderr,
+					"[scan] target %d/%d start %s (remaining=%d)\n",
+					current,
+					total,
+					target,
+					total-current,
+				)
+
 				if err := s.runTarget(ctx, writer, target); err != nil {
 					failureCount.Add(1)
-					fmt.Fprintf(os.Stderr, "target %s failed: %v\n", target, err)
+					completed := successCount.Load() + failureCount.Load()
+					fmt.Fprintf(
+						os.Stderr,
+						"[scan] target %s failed: %v (completed=%d/%d success=%d failed=%d)\n",
+						target,
+						err,
+						completed,
+						total,
+						successCount.Load(),
+						failureCount.Load(),
+					)
 					continue
 				}
 
 				successCount.Add(1)
+				completed := successCount.Load() + failureCount.Load()
+				fmt.Fprintf(
+					os.Stderr,
+					"[scan] target %s done (completed=%d/%d success=%d failed=%d)\n",
+					target,
+					completed,
+					total,
+					successCount.Load(),
+					failureCount.Load(),
+				)
 			}
 		}()
 	}
@@ -78,7 +110,7 @@ func (s *Service) Run(ctx context.Context) error {
 
 	fmt.Fprintf(
 		os.Stderr,
-		"targets total=%d success=%d failed=%d\n",
+		"[scan] targets total=%d success=%d failed=%d\n",
 		len(s.cfg.Targets),
 		successCount.Load(),
 		failureCount.Load(),
@@ -117,7 +149,7 @@ func (s *Service) runTarget(ctx context.Context, writer *output.JSONLWriter, tar
 		return err
 	}
 
-	fmt.Fprintf(os.Stderr, "[%s] discovered %d JavaScript assets from katana\n", target, len(jsURLs))
+	fmt.Fprintf(os.Stderr, "[scan][%s] discovered %d JavaScript assets from katana\n", target, len(jsURLs))
 
 	jobs := make(chan string)
 	findings := make(chan model.Finding)
@@ -194,7 +226,7 @@ func (s *Service) runTarget(ctx context.Context, writer *output.JSONLWriter, tar
 
 	fmt.Fprintf(
 		os.Stderr,
-		"[%s] scanned %d JavaScript assets, found %d valid source maps\n",
+		"[scan][%s] scanned %d JavaScript assets, found %d valid source maps\n",
 		target,
 		scannedCount.Load(),
 		findingCount.Load(),

@@ -57,7 +57,7 @@ func ParseConfig(args []string) (Config, error) {
 	fs.Usage = func() {
 		out := fs.Output()
 		fmt.Fprintf(out, "Usage: sourcemap-scan (-u https://target.tld | -l targets.txt) [options]\n\n")
-		fmt.Fprintln(out, "Important options:")
+		fmt.Fprintln(out, "Main options:")
 		fmt.Fprintln(out, "  -u string")
 		fmt.Fprintln(out, "        single target URL")
 		fmt.Fprintln(out, "  -l string")
@@ -65,16 +65,13 @@ func ParseConfig(args []string) (Config, error) {
 		fmt.Fprintln(out, "  -o string")
 		fmt.Fprintln(out, "        write findings as JSONL to this file (default: stdout)")
 		fmt.Fprintf(out, "  -target-workers int\n        number of targets to scan in parallel (default %d)\n", cfg.TargetWorkers)
-		fmt.Fprintf(out, "  -scan-workers int\n        number of JS scanning workers per target (default %d)\n", cfg.ScanWorkers)
 		fmt.Fprintf(out, "  -katana-bin string\n        path to katana binary (default %q)\n", cfg.KatanaBin)
-		fmt.Fprintln(out, "  -katana-extra-args string")
-		fmt.Fprintln(out, "        additional katana arguments, split on spaces")
 		fmt.Fprintln(out)
 		fmt.Fprintln(out, "Examples:")
 		fmt.Fprintln(out, "  sourcemap-scan -u https://target.tld")
-		fmt.Fprintln(out, "  sourcemap-scan -l targets.txt -target-workers 5 -o findings.jsonl")
+		fmt.Fprintln(out, "  sourcemap-scan -l targets.txt -o findings.jsonl")
 		fmt.Fprintln(out)
-		fmt.Fprintln(out, "Advanced flags still work but are omitted from this help for brevity.")
+		fmt.Fprintln(out, "Advanced flags are still supported but intentionally omitted from this help.")
 	}
 
 	if err := fs.Parse(args); err != nil {

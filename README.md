@@ -39,7 +39,58 @@ go build -o sourcemap-scan ./cmd/sourcemap-scan
 ./sourcemap-scan -l targets.txt -target-workers 5 -o findings.jsonl
 ./sourcemap-scan -u https://target.tld -katana-bin /usr/local/bin/katana
 ./sourcemap-scan -u https://target.tld -katana-extra-args "-H 'Cookie: session=...' -proxy http://127.0.0.1:8080"
+./sourcemap-scan process -i findings.jsonl -base-dir /opt/sourcemap/data
+./sourcemap-scan pipeline -l targets.txt -base-dir /opt/sourcemap/run
 ```
+
+## Process Subcommand
+
+The `process` subcommand keeps `shuji` and `trufflehog` as external tools, but moves the post-processing orchestration into Go.
+
+Example:
+
+```bash
+./sourcemap-scan process \
+  -i findings.jsonl \
+  -base-dir /opt/sourcemap/data \
+  -shuji-bin /usr/bin/shuji \
+  -trufflehog-bin /usr/local/bin/trufflehog \
+  -feishu-webhook https://open.feishu.cn/open-apis/bot/v2/hook/xxxx
+```
+
+The process stage:
+
+1. Reads `findings.jsonl`
+2. Skips already processed `map_url` values
+3. Downloads each `.map`
+4. Restores source via `shuji`
+5. Scans restored files via `trufflehog filesystem --json`
+6. Keeps all TruffleHog hits in the summary
+7. Sends Feishu notifications only for `Verified=true` results
+8. Writes `summary.json` and raw TruffleHog output under the base directory
+
+## Pipeline Subcommand
+
+The `pipeline` subcommand is the one-command Go workflow. It does not shell out to wrapper scripts for orchestration.
+
+Example:
+
+```bash
+./sourcemap-scan pipeline \
+  -l targets.txt \
+  -base-dir /opt/sourcemap/run \
+  -katana-bin /usr/local/bin/katana \
+  -shuji-bin /usr/bin/shuji \
+  -trufflehog-bin /usr/local/bin/trufflehog \
+  -feishu-webhook https://open.feishu.cn/open-apis/bot/v2/hook/xxxx
+```
+
+The pipeline stage:
+
+1. Runs the normal scan stage
+2. Writes findings JSONL to `-o`, or auto-generates one under `base-dir/findings/`
+3. Runs the Go `process` stage against that findings file
+4. Reuses `base-dir/work`, `base-dir/state`, and `base-dir/logs` for restored files, summaries, and dedupe state
 
 ## Example Output
 
