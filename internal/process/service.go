@@ -404,7 +404,7 @@ func (s *Service) buildSummary(ctx context.Context, finding model.Finding, hits 
 
 	for _, hit := range hits {
 		entry := classifiedHit{
-			Detector: firstNonEmpty(hit.DetectorName, hit.DetectorType, "unknown"),
+			Detector: firstNonEmpty(hit.DetectorName, string(hit.DetectorType), "unknown"),
 			Verified: hit.Verified,
 			FilePath: hitFilePath(hit),
 			Redacted: hit.Redacted,
@@ -479,19 +479,37 @@ func (s *Service) runTruffleHog(ctx context.Context, restoredDir string, rawOutp
 	args = append(args, s.cfg.TruffleHogExtraArgs...)
 
 	cmd := exec.CommandContext(ctx, s.cfg.TruffleHogBin, args...)
-	output, err := cmd.CombinedOutput()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
 	if err != nil {
-		return nil, fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
+		message := strings.TrimSpace(stderr.String())
+		if message == "" {
+			message = strings.TrimSpace(stdout.String())
+		}
+		return nil, fmt.Errorf("%w: %s", err, message)
 	}
 
 	if s.cfg.KeepArtifacts {
-		if err := os.WriteFile(rawOutputPath, output, 0o644); err != nil {
+		if err := os.MkdirAll(filepath.Dir(rawOutputPath), 0o755); err != nil {
+			return nil, err
+		}
+
+		artifact := stdout.Bytes()
+		if stderr.Len() > 0 {
+			artifact = append(append([]byte{}, stdout.Bytes()...), stderr.Bytes()...)
+		}
+
+		if err := os.WriteFile(rawOutputPath, artifact, 0o644); err != nil {
 			return nil, err
 		}
 	}
 
 	var hits []truffleHogHit
-	scanner := bufio.NewScanner(bytes.NewReader(output))
+	scanner := bufio.NewScanner(bytes.NewReader(stdout.Bytes()))
 	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 
 	for scanner.Scan() {
@@ -505,7 +523,7 @@ func (s *Service) runTruffleHog(ctx context.Context, restoredDir string, rawOutp
 			continue
 		}
 
-		if firstNonEmpty(hit.DetectorName, hit.DetectorType) == "" {
+		if firstNonEmpty(hit.DetectorName, string(hit.DetectorType)) == "" {
 			continue
 		}
 
@@ -629,7 +647,7 @@ func (s *Service) notifyFeishu(ctx context.Context, finding model.Finding, hit t
 		return false, nil
 	}
 
-	detector := firstNonEmpty(hit.DetectorName, hit.DetectorType, "unknown")
+	detector := firstNonEmpty(hit.DetectorName, string(hit.DetectorType), "unknown")
 	filePath := hitFilePath(hit)
 	redacted := firstNonEmpty(strings.TrimSpace(hit.Redacted), "(empty)")
 	assetURL := firstNonEmpty(strings.TrimSpace(finding.AssetURL), "(unknown)")

@@ -1,13 +1,40 @@
 package process
 
-import "time"
+import (
+	"encoding/json"
+	"fmt"
+	"time"
+)
+
+type detectorType string
+
+func (d *detectorType) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		*d = ""
+		return nil
+	}
+
+	var text string
+	if err := json.Unmarshal(data, &text); err == nil {
+		*d = detectorType(text)
+		return nil
+	}
+
+	var number json.Number
+	if err := json.Unmarshal(data, &number); err == nil {
+		*d = detectorType(number.String())
+		return nil
+	}
+
+	return fmt.Errorf("unsupported DetectorType: %s", string(data))
+}
 
 type truffleHogHit struct {
-	DetectorName string `json:"DetectorName"`
-	DetectorType string `json:"DetectorType"`
-	Verified     bool   `json:"Verified"`
-	Raw          string `json:"Raw"`
-	Redacted     string `json:"Redacted"`
+	DetectorName string       `json:"DetectorName"`
+	DetectorType detectorType `json:"DetectorType"`
+	Verified     bool         `json:"Verified"`
+	Raw          string       `json:"Raw"`
+	Redacted     string       `json:"Redacted"`
 	SourceMeta   struct {
 		Data struct {
 			Filesystem struct {
