@@ -36,7 +36,9 @@ func ParseConfig(args []string) (Config, error) {
 		BaseDir:                ".sourcemap-pipeline",
 		ShujiBin:               "shuji",
 		TruffleHogBin:          "trufflehog",
+		ProcessWorkers:         1,
 		OnlyWithSourcesContent: true,
+		FeishuWebhook:          process.DefaultFeishuWebhook,
 	}
 
 	fs.StringVar(&singleTarget, "u", "", "single target URL")
@@ -56,13 +58,15 @@ func ParseConfig(args []string) (Config, error) {
 	fs.Int64Var(&scanCfg.MaxMapBytes, "max-map-bytes", 10*1024*1024, "maximum map response bytes to read before aborting")
 	fs.StringVar(&scanCfg.UserAgent, "user-agent", "sourcemap-scan/0.1", "user agent used for JS and map requests")
 
-	fs.StringVar(&processCfg.BaseDir, "base-dir", ".sourcemap-pipeline", "base directory for findings, work, state, and logs")
+	fs.StringVar(&processCfg.BaseDir, "base-dir", ".sourcemap-pipeline", "base directory for compact outputs (findings/results/state)")
 	fs.StringVar(&processCfg.ShujiBin, "shuji-bin", "shuji", "path to shuji binary")
 	fs.StringVar(&processCfg.TruffleHogBin, "trufflehog-bin", "trufflehog", "path to trufflehog binary")
+	fs.IntVar(&processCfg.ProcessWorkers, "process-workers", 1, "number of sourcemaps to process in parallel")
 	fs.StringVar(&trufflehogExtraArgs, "trufflehog-extra-args", "", "additional trufflehog arguments, split on spaces")
 	fs.BoolVar(&processCfg.KeepRestored, "keep-restored", false, "keep restored source directories after processing")
+	fs.BoolVar(&processCfg.KeepArtifacts, "keep-artifacts", false, "keep per-map artifacts such as summary.json and raw TruffleHog output")
 	fs.BoolVar(&processCfg.OnlyWithSourcesContent, "only-with-sources-content", true, "process only findings with sourcesContent")
-	fs.StringVar(&processCfg.FeishuWebhook, "feishu-webhook", "", "Feishu bot webhook for notifications")
+	fs.StringVar(&processCfg.FeishuWebhook, "feishu-webhook", process.DefaultFeishuWebhook, "Feishu bot webhook for notifications")
 
 	fs.Usage = func() {
 		out := fs.Output()
@@ -74,13 +78,16 @@ func ParseConfig(args []string) (Config, error) {
 		fmt.Fprintln(out, "  -l string")
 		fmt.Fprintln(out, "        file with target URLs, one per line")
 		fmt.Fprintln(out, "  -base-dir string")
-		fmt.Fprintln(out, "        base directory for findings, work, state, and logs")
+		fmt.Fprintln(out, "        base directory for compact outputs (findings/results/state)")
 		fmt.Fprintf(out, "  -target-workers int\n        number of targets to scan in parallel (default %d)\n", scanCfg.TargetWorkers)
 		fmt.Fprintf(out, "  -katana-bin string\n        path to katana binary (default %q)\n", scanCfg.KatanaBin)
 		fmt.Fprintf(out, "  -shuji-bin string\n        path to shuji binary (default %q)\n", processCfg.ShujiBin)
 		fmt.Fprintf(out, "  -trufflehog-bin string\n        path to trufflehog binary (default %q)\n", processCfg.TruffleHogBin)
+		fmt.Fprintf(out, "  -process-workers int\n        number of sourcemaps to process in parallel (default %d)\n", processCfg.ProcessWorkers)
+		fmt.Fprintln(out, "  -keep-artifacts")
+		fmt.Fprintln(out, "        keep per-map artifacts under base-dir/work")
 		fmt.Fprintln(out, "  -feishu-webhook string")
-		fmt.Fprintln(out, "        Feishu bot webhook for verified hits")
+		fmt.Fprintln(out, "        Feishu bot webhook for verified hits (default: built-in webhook)")
 		fmt.Fprintln(out)
 		fmt.Fprintln(out, "Examples:")
 		fmt.Fprintln(out, "  sourcemap-scan pipeline -u https://target.tld -base-dir /opt/sourcemap/run1")
@@ -135,6 +142,9 @@ func ParseConfig(args []string) (Config, error) {
 		return Config{}, errors.New("base-dir must not be empty")
 	}
 	processCfg.BaseDir = filepath.Clean(processCfg.BaseDir)
+	if processCfg.ProcessWorkers < 1 {
+		return Config{}, errors.New("process-workers must be >= 1")
+	}
 	processCfg.FeishuWebhook = strings.TrimSpace(processCfg.FeishuWebhook)
 
 	if katanaExtraArgs != "" {

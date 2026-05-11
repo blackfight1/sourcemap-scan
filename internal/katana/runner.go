@@ -11,6 +11,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 
 	"sourcemap-scan/internal/app"
 )
@@ -59,8 +60,25 @@ func (r *Runner) CollectJSURLs(ctx context.Context) ([]string, error) {
 		return nil, fmt.Errorf("starting katana: %w", err)
 	}
 
-	stderrText, stderrErr := readAllText(stderr)
-	urls, parseErr := parseJSURLs(stdout)
+	var stderrText string
+	var urls []string
+	var stderrErr error
+	var parseErr error
+
+	var readWG sync.WaitGroup
+	readWG.Add(2)
+
+	go func() {
+		defer readWG.Done()
+		stderrText, stderrErr = readAllText(stderr)
+	}()
+
+	go func() {
+		defer readWG.Done()
+		urls, parseErr = parseJSURLs(stdout)
+	}()
+
+	readWG.Wait()
 	waitErr := cmd.Wait()
 
 	if stderrErr != nil {

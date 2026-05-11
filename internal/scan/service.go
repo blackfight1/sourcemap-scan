@@ -3,12 +3,12 @@ package scan
 import (
 	"context"
 	"fmt"
-	"os"
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
 
 	"sourcemap-scan/internal/app"
+	"sourcemap-scan/internal/console"
 	"sourcemap-scan/internal/httpx"
 	"sourcemap-scan/internal/katana"
 	"sourcemap-scan/internal/model"
@@ -19,12 +19,18 @@ import (
 type Service struct {
 	cfg        app.Config
 	httpClient *httpx.Client
+	onFinding  func(context.Context, model.Finding) error
 }
 
 func NewService(cfg app.Config) (*Service, error) {
+	return NewServiceWithEmitter(cfg, nil)
+}
+
+func NewServiceWithEmitter(cfg app.Config, onFinding func(context.Context, model.Finding) error) (*Service, error) {
 	return &Service{
 		cfg:        cfg,
 		httpClient: httpx.New(cfg.HTTPTimeout, cfg.UserAgent),
+		onFinding:  onFinding,
 	}, nil
 }
 
@@ -52,41 +58,32 @@ func (s *Service) Run(ctx context.Context) error {
 
 				current := startedCount.Add(1)
 				total := int64(len(s.cfg.Targets))
-				fmt.Fprintf(
-					os.Stderr,
-					"[scan] target %d/%d start %s (remaining=%d)\n",
+				console.Scanf(
+					"target %d/%d start %s %s",
 					current,
 					total,
-					target,
-					total-current,
+					console.Highlight(target),
+					console.Dim(fmt.Sprintf("(remaining=%d)", total-current)),
 				)
 
 				if err := s.runTarget(ctx, writer, target); err != nil {
 					failureCount.Add(1)
 					completed := successCount.Load() + failureCount.Load()
-					fmt.Fprintf(
-						os.Stderr,
-						"[scan] target %s failed: %v (completed=%d/%d success=%d failed=%d)\n",
+					console.Failf(
+						"target %s failed: %v %s",
 						target,
 						err,
-						completed,
-						total,
-						successCount.Load(),
-						failureCount.Load(),
+						console.Dim(fmt.Sprintf("(completed=%d/%d success=%d failed=%d)", completed, total, successCount.Load(), failureCount.Load())),
 					)
 					continue
 				}
 
 				successCount.Add(1)
 				completed := successCount.Load() + failureCount.Load()
-				fmt.Fprintf(
-					os.Stderr,
-					"[scan] target %s done (completed=%d/%d success=%d failed=%d)\n",
+				console.Successf(
+					"target %s done %s",
 					target,
-					completed,
-					total,
-					successCount.Load(),
-					failureCount.Load(),
+					console.Dim(fmt.Sprintf("(completed=%d/%d success=%d failed=%d)", completed, total, successCount.Load(), failureCount.Load())),
 				)
 			}
 		}()
@@ -108,13 +105,25 @@ func (s *Service) Run(ctx context.Context) error {
 		return err
 	}
 
-	fmt.Fprintf(
-		os.Stderr,
-		"[scan] targets total=%d success=%d failed=%d\n",
-		len(s.cfg.Targets),
-		successCount.Load(),
-		failureCount.Load(),
-	)
+	if successCount.Load() == 0 && failureCount.Load() > 0 {
+		return fmt.Errorf("all targets failed: %d", failureCount.Load())
+	}
+
+	if failureCount.Load() > 0 {
+		console.Warnf(
+			"targets total=%d success=%d failed=%d",
+			len(s.cfg.Targets),
+			successCount.Load(),
+			failureCount.Load(),
+		)
+	} else {
+		console.Successf(
+			"targets total=%d success=%d failed=%d",
+			len(s.cfg.Targets),
+			successCount.Load(),
+			failureCount.Load(),
+		)
+	}
 
 	return nil
 }
@@ -123,7 +132,7 @@ func (s *Service) runTarget(ctx context.Context, writer *output.JSONLWriter, tar
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			err = fmt.Errorf("panic while scanning target: %v", recovered)
-			fmt.Fprintf(os.Stderr, "[%s] panic recovered:\n%s", target, debug.Stack())
+			console.Failf("%s panic recovered:\n%s", target, debug.Stack())
 		}
 	}()
 
@@ -149,7 +158,7 @@ func (s *Service) runTarget(ctx context.Context, writer *output.JSONLWriter, tar
 		return err
 	}
 
-	fmt.Fprintf(os.Stderr, "[scan][%s] discovered %d JavaScript assets from katana\n", target, len(jsURLs))
+	console.Scanf("%s discovered %d JavaScript assets from katana", console.Highlight(target), len(jsURLs))
 
 	jobs := make(chan string)
 	findings := make(chan model.Finding)
@@ -167,7 +176,7 @@ func (s *Service) runTarget(ctx context.Context, writer *output.JSONLWriter, tar
 					defer func() {
 						if recovered := recover(); recovered != nil {
 							setTargetErr(fmt.Errorf("panic while scanning asset %s: %v", assetURL, recovered))
-							fmt.Fprintf(os.Stderr, "[%s] asset panic recovered for %s:\n%s", target, assetURL, debug.Stack())
+							console.Failf("%s asset panic recovered for %s:\n%s", target, assetURL, debug.Stack())
 						}
 					}()
 
@@ -213,7 +222,7 @@ func (s *Service) runTarget(ctx context.Context, writer *output.JSONLWriter, tar
 	}()
 
 	for finding := range findings {
-		if err := writer.WriteFinding(finding); err != nil {
+		if err := s.emitFinding(targetCtx, writer, finding); err != nil {
 			setTargetErr(fmt.Errorf("writing finding failed: %w", err))
 			continue
 		}
@@ -224,15 +233,33 @@ func (s *Service) runTarget(ctx context.Context, writer *output.JSONLWriter, tar
 		return firstErr
 	}
 
-	fmt.Fprintf(
-		os.Stderr,
-		"[scan][%s] scanned %d JavaScript assets, found %d valid source maps\n",
-		target,
-		scannedCount.Load(),
-		findingCount.Load(),
-	)
+	if findingCount.Load() > 0 {
+		console.Successf(
+			"%s scanned %d JavaScript assets, found %d valid source maps",
+			target,
+			scannedCount.Load(),
+			findingCount.Load(),
+		)
+	} else {
+		console.Scanf(
+			"%s scanned %d JavaScript assets, found %d valid source maps",
+			target,
+			scannedCount.Load(),
+			findingCount.Load(),
+		)
+	}
 
 	return nil
+}
+
+func (s *Service) emitFinding(ctx context.Context, writer *output.JSONLWriter, finding model.Finding) error {
+	if err := writer.WriteFinding(finding); err != nil {
+		return err
+	}
+	if s.onFinding == nil {
+		return nil
+	}
+	return s.onFinding(ctx, finding)
 }
 
 func (s *Service) scanAsset(ctx context.Context, target string, assetURL string) ([]model.Finding, error) {

@@ -28,7 +28,14 @@ type classifiedHit struct {
 
 type summary struct {
 	Target            string          `json:"target"`
+	TargetHost        string          `json:"target_host,omitempty"`
+	AssetURL          string          `json:"asset_url,omitempty"`
 	MapURL            string          `json:"map_url"`
+	File              string          `json:"file,omitempty"`
+	DiscoveredBy      string          `json:"discovered_by,omitempty"`
+	SourcesCount      int             `json:"sources_count"`
+	NamesCount        int             `json:"names_count"`
+	HasSourcesContent bool            `json:"has_sources_content"`
 	ProcessedAt       time.Time       `json:"processed_at"`
 	RestoreSuccess    bool            `json:"restore_success"`
 	TruffleHogSuccess bool            `json:"trufflehog_success"`

@@ -1,6 +1,6 @@
 # sourcemap-scan
 
-A Go CLI for finding exposed JavaScript source maps on one or many targets.
+A Go CLI for finding exposed JavaScript sourcemaps and running a full post-processing pipeline with `shuji` and `trufflehog`.
 
 ## Current Scope
 
@@ -36,12 +36,19 @@ go build -o sourcemap-scan ./cmd/sourcemap-scan
 ```bash
 ./sourcemap-scan -u https://target.tld
 ./sourcemap-scan -l targets.txt
-./sourcemap-scan -l targets.txt -target-workers 5 -o findings.jsonl
-./sourcemap-scan -u https://target.tld -katana-bin /usr/local/bin/katana
-./sourcemap-scan -u https://target.tld -katana-extra-args "-H 'Cookie: session=...' -proxy http://127.0.0.1:8080"
 ./sourcemap-scan process -i findings.jsonl -base-dir /opt/sourcemap/data
-./sourcemap-scan pipeline -l targets.txt -base-dir /opt/sourcemap/run
+./sourcemap-scan pipeline -u https://target.tld -base-dir /opt/sourcemap/run
+./sourcemap-scan pipeline -l targets.txt -base-dir /opt/sourcemap/batch -target-workers 10 -process-workers 4
 ```
+
+Main commands:
+
+- `sourcemap-scan`
+  Scan only. Outputs findings JSONL.
+- `sourcemap-scan process`
+  Process existing findings JSONL with `shuji` and `trufflehog`.
+- `sourcemap-scan pipeline`
+  One command from target list to verified secret notification.
 
 ## Process Subcommand
 
@@ -55,7 +62,7 @@ Example:
   -base-dir /opt/sourcemap/data \
   -shuji-bin /usr/bin/shuji \
   -trufflehog-bin /usr/local/bin/trufflehog \
-  -feishu-webhook https://open.feishu.cn/open-apis/bot/v2/hook/xxxx
+  -process-workers 2
 ```
 
 The process stage:
@@ -65,9 +72,10 @@ The process stage:
 3. Downloads each `.map`
 4. Restores source via `shuji`
 5. Scans restored files via `trufflehog filesystem --json`
-6. Keeps all TruffleHog hits in the summary
+6. Keeps all TruffleHog hits in the summary JSONL
 7. Sends Feishu notifications only for `Verified=true` results
-8. Writes `summary.json` and raw TruffleHog output under the base directory
+8. Appends one compact line per processed map into `results/summaries.jsonl`
+9. Keeps per-map artifacts only when `-keep-artifacts` is enabled
 
 ## Pipeline Subcommand
 
@@ -82,15 +90,63 @@ Example:
   -katana-bin /usr/local/bin/katana \
   -shuji-bin /usr/bin/shuji \
   -trufflehog-bin /usr/local/bin/trufflehog \
-  -feishu-webhook https://open.feishu.cn/open-apis/bot/v2/hook/xxxx
+  -target-workers 8 \
+  -process-workers 3
 ```
 
 The pipeline stage:
 
-1. Runs the normal scan stage
+1. Starts the scan stage
 2. Writes findings JSONL to `-o`, or auto-generates one under `base-dir/findings/`
-3. Runs the Go `process` stage against that findings file
-4. Reuses `base-dir/work`, `base-dir/state`, and `base-dir/logs` for restored files, summaries, and dedupe state
+3. Streams each finding directly into the Go `process` stage as soon as it is discovered
+4. Processes sourcemaps concurrently with `-process-workers`
+5. Reuses `base-dir/findings`, `base-dir/results`, and `base-dir/state` as the default compact output layout
+6. Writes `base-dir/work` only when `-keep-artifacts` is enabled
+
+Batch concurrency model:
+
+- `-target-workers`
+  Number of targets scanned in parallel
+- `-scan-workers`
+  Number of JS assets checked in parallel inside each target
+- `-process-workers`
+  Number of sourcemaps restored and scanned in parallel
+
+Failure handling:
+
+- If one target fails during the scan stage, the pipeline skips that target and continues with the rest
+- If one sourcemap fails during processing, the rest of the queue continues
+- The final exit code is non-zero when any target or finding fails
+
+Default notifications:
+
+- Feishu webhook is built in by default
+- Only `Verified=true` TruffleHog results are sent
+- Notification payload is an interactive card with target, detector, secret redacted value, asset URL, map URL, bundle file, and source file
+
+Default output layout:
+
+```text
+base-dir/
+  findings/
+    findings-*.jsonl
+  results/
+    summaries.jsonl
+  state/
+    processed-maps.txt
+```
+
+Artifacts kept only with `-keep-artifacts`:
+
+```text
+base-dir/
+  work/
+    <host>/<hash>/
+      map/
+      restored/
+      summary.json
+      trufflehog.raw.jsonl
+```
 
 ## Example Output
 
@@ -113,9 +169,41 @@ Each finding is emitted as one JSON line:
 }
 ```
 
+Each processed sourcemap appends one line to `results/summaries.jsonl`:
+
+```json
+{
+  "target": "https://target.tld",
+  "target_host": "target.tld",
+  "asset_url": "https://target.tld/static/app.js",
+  "map_url": "https://target.tld/static/app.js.map",
+  "file": "app.js",
+  "discovered_by": "js_comment",
+  "sources_count": 42,
+  "names_count": 1337,
+  "has_sources_content": true,
+  "processed_at": "2026-05-11T08:00:00Z",
+  "restore_success": true,
+  "trufflehog_success": true,
+  "hits_total": 3,
+  "verified_hits": 1,
+  "notified": 1,
+  "hits": [
+    {
+      "detector": "PayPal",
+      "verified": true,
+      "file_path": "src/config/payments.ts",
+      "redacted": "A***Z",
+      "notified": true
+    }
+  ]
+}
+```
+
 ## Notes
 
 - The scanner only targets `.js` and `.mjs` assets for now.
 - `data:` sourcemap URLs are intentionally ignored because they are not exposed remote `.map` files.
 - The tool uses a tail-range fetch first and falls back to reading the returned body as needed by the server response.
 - `-target-workers` controls parallel targets, while `-scan-workers` controls per-target JavaScript scanning.
+- On Linux VPS, use `tmux` or `screen` if you want the pipeline to keep running after disconnecting.
