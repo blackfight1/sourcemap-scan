@@ -12,6 +12,7 @@ import (
 type Config struct {
 	InputPath              string
 	BaseDir                string
+	Verbose                bool
 	ShujiBin               string
 	TruffleHogBin          string
 	TruffleHogExtraArgs    []string
@@ -30,6 +31,7 @@ func ParseConfig(args []string) (Config, error) {
 
 	fs.StringVar(&cfg.InputPath, "i", "", "input findings JSONL file")
 	fs.StringVar(&cfg.BaseDir, "base-dir", ".sourcemap-process", "base directory for compact outputs (findings/results/state)")
+	fs.BoolVar(&cfg.Verbose, "verbose", false, "print detailed stage-level logs")
 	fs.StringVar(&cfg.ShujiBin, "shuji-bin", "shuji", "path to shuji binary")
 	fs.StringVar(&cfg.TruffleHogBin, "trufflehog-bin", "trufflehog", "path to trufflehog binary")
 	fs.IntVar(&cfg.ProcessWorkers, "process-workers", 1, "number of sourcemaps to process in parallel")
@@ -48,6 +50,8 @@ func ParseConfig(args []string) (Config, error) {
 		fmt.Fprintln(out, "        input findings JSONL file")
 		fmt.Fprintln(out, "  -base-dir string")
 		fmt.Fprintln(out, "        base directory for compact outputs (findings/results/state)")
+		fmt.Fprintln(out, "  -verbose")
+		fmt.Fprintln(out, "        print detailed stage-level logs")
 		fmt.Fprintln(out, "  -shuji-bin string")
 		fmt.Fprintln(out, "        path to shuji binary")
 		fmt.Fprintln(out, "  -trufflehog-bin string")

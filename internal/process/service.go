@@ -123,6 +123,43 @@ func (s *Service) runQueue(ctx context.Context, findings <-chan model.Finding, t
 	var hitsTotalCount atomic.Int64
 	var verifiedHitsCount atomic.Int64
 	var notifiedCount atomic.Int64
+	var activeCount atomic.Int64
+
+	doneSummary := make(chan struct{})
+	go func() {
+		if s.cfg.Verbose {
+			return
+		}
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-doneSummary:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				totalSeen := startedCount.Load()
+				done := completedCount.Load()
+				left := totalSeen - done
+				if left < 0 {
+					left = 0
+				}
+				console.Processf(
+					"summary findings seen=%d done=%d running=%d left=%d hits=%d verified=%d notified=%d failed=%d",
+					totalSeen,
+					done,
+					activeCount.Load(),
+					left,
+					hitsTotalCount.Load(),
+					verifiedHitsCount.Load(),
+					notifiedCount.Load(),
+					failureCount.Load(),
+				)
+			}
+		}
+	}()
+	defer close(doneSummary)
 
 	var workerWG sync.WaitGroup
 	for workerID := 0; workerID < s.cfg.ProcessWorkers; workerID++ {
@@ -137,9 +174,11 @@ func (s *Service) runQueue(ctx context.Context, findings <-chan model.Finding, t
 				}
 
 				current := startedCount.Add(1)
+				activeCount.Add(1)
 				s.logFindingStart(current, total, finding)
 
 				result, err := s.processFinding(ctx, finding)
+				activeCount.Add(-1)
 				completed := completedCount.Add(1)
 				if err != nil {
 					failed := failureCount.Add(1)
@@ -308,9 +347,9 @@ func (s *Service) processFinding(ctx context.Context, finding model.Finding) (pr
 	}
 	defer os.RemoveAll(tempDir)
 
-	if s.cfg.KeepArtifacts {
+	if s.cfg.Verbose && s.cfg.KeepArtifacts {
 		console.Stagef("process", finding.MapURL, "prepare", "tempdir=%s", tempDir)
-	} else {
+	} else if s.cfg.Verbose {
 		console.Stagef("process", finding.MapURL, "prepare", "tempdir=ephemeral")
 	}
 
@@ -319,17 +358,23 @@ func (s *Service) processFinding(ctx context.Context, finding model.Finding) (pr
 	if err := os.MkdirAll(restoredDir, 0o755); err != nil {
 		return processResult{}, err
 	}
-	console.Stagef("process", finding.MapURL, "download", "")
+	if s.cfg.Verbose {
+		console.Stagef("process", finding.MapURL, "download", "")
+	}
 	if err := s.downloadMap(ctx, finding.MapURL, mapFilePath); err != nil {
 		return processResult{}, fmt.Errorf("download map: %w", err)
 	}
 
-	console.Stagef("process", finding.MapURL, "shuji", "")
+	if s.cfg.Verbose {
+		console.Stagef("process", finding.MapURL, "shuji", "")
+	}
 	if err := s.runShuji(ctx, mapFilePath, restoredDir); err != nil {
 		return processResult{}, fmt.Errorf("shuji: %w", err)
 	}
 
-	console.Stagef("process", finding.MapURL, "trufflehog", "")
+	if s.cfg.Verbose {
+		console.Stagef("process", finding.MapURL, "trufflehog", "")
+	}
 	hits, err := s.runTruffleHog(ctx, restoredDir, filepath.Join(workDir, "trufflehog.raw.jsonl"))
 	if err != nil {
 		return processResult{}, fmt.Errorf("trufflehog: %w", err)
@@ -337,7 +382,9 @@ func (s *Service) processFinding(ctx context.Context, finding model.Finding) (pr
 
 	if s.cfg.KeepArtifacts {
 		mapDir = filepath.Join(workDir, "map")
-		console.Stagef("process", finding.MapURL, "archive", "workdir=%s", workDir)
+		if s.cfg.Verbose {
+			console.Stagef("process", finding.MapURL, "archive", "workdir=%s", workDir)
+		}
 		if err := os.MkdirAll(mapDir, 0o755); err != nil {
 			return processResult{}, err
 		}
@@ -354,7 +401,9 @@ func (s *Service) processFinding(ctx context.Context, finding model.Finding) (pr
 		}
 	}
 
-	console.Stagef("process", finding.MapURL, "analyze", "hits=%d", len(hits))
+	if s.cfg.Verbose {
+		console.Stagef("process", finding.MapURL, "analyze", "hits=%d", len(hits))
+	}
 	summaryResult, err := s.buildSummary(ctx, finding, hits)
 	if err != nil {
 		return processResult{}, err
@@ -373,7 +422,9 @@ func (s *Service) processFinding(ctx context.Context, finding model.Finding) (pr
 	}
 
 	if !s.cfg.KeepRestored {
-		console.Stagef("process", finding.MapURL, "cleanup", "restored=false")
+		if s.cfg.Verbose {
+			console.Stagef("process", finding.MapURL, "cleanup", "restored=false")
+		}
 	}
 
 	s.finishMap(finding.MapURL, true)
@@ -849,6 +900,9 @@ func (s *Service) storeStats(stats Stats) {
 }
 
 func (s *Service) logFindingStart(current int64, total int, finding model.Finding) {
+	if !s.cfg.Verbose && total == 0 {
+		return
+	}
 	if total > 0 {
 		console.Processf(
 			"finding %d/%d start target=%s map=%s",
@@ -893,6 +947,9 @@ func (s *Service) logFindingFailure(current int64, total int, completed int64, s
 }
 
 func (s *Service) logFindingSkipped(current int64, total int, completed int64, success int64, skipped int64, failed int64, finding model.Finding) {
+	if !s.cfg.Verbose {
+		return
+	}
 	if total > 0 {
 		console.Skipf(
 			"process finding %d/%d skipped target=%s map=%s %s",

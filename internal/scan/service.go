@@ -6,6 +6,7 @@ import (
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"sourcemap-scan/internal/app"
 	"sourcemap-scan/internal/console"
@@ -46,6 +47,40 @@ func (s *Service) Run(ctx context.Context) error {
 	var successCount atomic.Int64
 	var failureCount atomic.Int64
 	var startedCount atomic.Int64
+	var activeCount atomic.Int64
+
+	doneSummary := make(chan struct{})
+	go func() {
+		if s.cfg.Verbose || len(s.cfg.Targets) <= 1 {
+			return
+		}
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-doneSummary:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				done := successCount.Load() + failureCount.Load()
+				total := int64(len(s.cfg.Targets))
+				left := total - done - activeCount.Load()
+				if left < 0 {
+					left = 0
+				}
+				console.Pipelinef(
+					"summary targets done=%d/%d running=%d left=%d failed=%d",
+					done,
+					total,
+					activeCount.Load(),
+					left,
+					failureCount.Load(),
+				)
+			}
+		}
+	}()
+	defer close(doneSummary)
 
 	for i := 0; i < s.cfg.TargetWorkers; i++ {
 		workerWG.Add(1)
@@ -58,6 +93,7 @@ func (s *Service) Run(ctx context.Context) error {
 
 				current := startedCount.Add(1)
 				total := int64(len(s.cfg.Targets))
+				activeCount.Add(1)
 				console.Scanf(
 					"target %d/%d start %s %s",
 					current,
@@ -67,6 +103,7 @@ func (s *Service) Run(ctx context.Context) error {
 				)
 
 				if err := s.runTarget(ctx, writer, target); err != nil {
+					activeCount.Add(-1)
 					failureCount.Add(1)
 					completed := successCount.Load() + failureCount.Load()
 					console.Failf(
@@ -78,6 +115,7 @@ func (s *Service) Run(ctx context.Context) error {
 					continue
 				}
 
+				activeCount.Add(-1)
 				successCount.Add(1)
 				completed := successCount.Load() + failureCount.Load()
 				console.Successf(
@@ -158,7 +196,9 @@ func (s *Service) runTarget(ctx context.Context, writer *output.JSONLWriter, tar
 		return err
 	}
 
-	console.Scanf("%s discovered %d JavaScript assets from katana", console.Highlight(target), len(jsURLs))
+	if s.cfg.Verbose || len(jsURLs) > 0 {
+		console.Scanf("%s discovered %d JavaScript assets from katana", console.Highlight(target), len(jsURLs))
+	}
 
 	jobs := make(chan string)
 	findings := make(chan model.Finding)

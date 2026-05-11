@@ -14,6 +14,7 @@ import (
 type Config struct {
 	Targets           []string
 	OutputPath        string
+	Verbose           bool
 	TargetWorkers     int
 	KatanaBin         string
 	KatanaDepth       int
@@ -40,6 +41,7 @@ func ParseConfig(args []string) (Config, error) {
 	fs.StringVar(&singleTarget, "u", "", "single target URL")
 	fs.StringVar(&targetFile, "l", "", "file with target URLs, one per line")
 	fs.StringVar(&cfg.OutputPath, "o", "", "write findings as JSONL to this file (default: stdout)")
+	fs.BoolVar(&cfg.Verbose, "verbose", false, "print detailed stage-level logs")
 	fs.IntVar(&cfg.TargetWorkers, "target-workers", 2, "number of targets to scan in parallel")
 	fs.StringVar(&cfg.KatanaBin, "katana-bin", "katana", "path to katana binary")
 	fs.IntVar(&cfg.KatanaDepth, "katana-depth", 3, "katana crawl depth")
@@ -64,6 +66,8 @@ func ParseConfig(args []string) (Config, error) {
 		fmt.Fprintln(out, "        file with target URLs, one per line")
 		fmt.Fprintln(out, "  -o string")
 		fmt.Fprintln(out, "        write findings as JSONL to this file (default: stdout)")
+		fmt.Fprintln(out, "  -verbose")
+		fmt.Fprintln(out, "        print detailed stage-level logs")
 		fmt.Fprintf(out, "  -target-workers int\n        number of targets to scan in parallel (default %d)\n", cfg.TargetWorkers)
 		fmt.Fprintf(out, "  -katana-bin string\n        path to katana binary (default %q)\n", cfg.KatanaBin)
 		fmt.Fprintln(out)

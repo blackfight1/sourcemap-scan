@@ -34,6 +34,7 @@ func ParseConfig(args []string) (Config, error) {
 	scanCfg := app.Config{}
 	processCfg := process.Config{
 		BaseDir:                ".sourcemap-pipeline",
+		Verbose:                false,
 		ShujiBin:               "shuji",
 		TruffleHogBin:          "trufflehog",
 		ProcessWorkers:         1,
@@ -44,6 +45,7 @@ func ParseConfig(args []string) (Config, error) {
 	fs.StringVar(&singleTarget, "u", "", "single target URL")
 	fs.StringVar(&targetFile, "l", "", "file with target URLs, one per line")
 	fs.StringVar(&cfg.FindingsPath, "o", "", "write findings JSONL here (default: auto path under base-dir)")
+	fs.BoolVar(&scanCfg.Verbose, "verbose", false, "print detailed stage-level logs")
 	fs.IntVar(&scanCfg.TargetWorkers, "target-workers", 2, "number of targets to scan in parallel")
 	fs.StringVar(&scanCfg.KatanaBin, "katana-bin", "katana", "path to katana binary")
 	fs.IntVar(&scanCfg.KatanaDepth, "katana-depth", 3, "katana crawl depth")
@@ -77,6 +79,8 @@ func ParseConfig(args []string) (Config, error) {
 		fmt.Fprintln(out, "        single target URL")
 		fmt.Fprintln(out, "  -l string")
 		fmt.Fprintln(out, "        file with target URLs, one per line")
+		fmt.Fprintln(out, "  -verbose")
+		fmt.Fprintln(out, "        print detailed stage-level logs")
 		fmt.Fprintln(out, "  -base-dir string")
 		fmt.Fprintln(out, "        base directory for compact outputs (findings/results/state)")
 		fmt.Fprintf(out, "  -target-workers int\n        number of targets to scan in parallel (default %d)\n", scanCfg.TargetWorkers)
@@ -141,6 +145,7 @@ func ParseConfig(args []string) (Config, error) {
 	if processCfg.BaseDir == "" {
 		return Config{}, errors.New("base-dir must not be empty")
 	}
+	processCfg.Verbose = scanCfg.Verbose
 	processCfg.BaseDir = filepath.Clean(processCfg.BaseDir)
 	if processCfg.ProcessWorkers < 1 {
 		return Config{}, errors.New("process-workers must be >= 1")
