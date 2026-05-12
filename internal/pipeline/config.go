@@ -20,6 +20,7 @@ type Config struct {
 	Process          process.Config
 	FindingsPath     string
 	AutoFindingsPath bool
+	BatchSize        int
 }
 
 func ParseConfig(args []string) (Config, error) {
@@ -45,6 +46,7 @@ func ParseConfig(args []string) (Config, error) {
 	fs.StringVar(&singleTarget, "u", "", "single target URL")
 	fs.StringVar(&targetFile, "l", "", "file with target URLs, one per line")
 	fs.StringVar(&cfg.FindingsPath, "o", "", "write findings JSONL here (default: auto path under base-dir)")
+	fs.IntVar(&cfg.BatchSize, "batch-size", 10000, "number of targets per internal batch")
 	fs.BoolVar(&scanCfg.Verbose, "verbose", false, "print detailed stage-level logs")
 	fs.IntVar(&scanCfg.TargetWorkers, "target-workers", 2, "number of targets to scan in parallel")
 	fs.StringVar(&scanCfg.KatanaBin, "katana-bin", "katana", "path to katana binary")
@@ -83,6 +85,7 @@ func ParseConfig(args []string) (Config, error) {
 		fmt.Fprintln(out, "        print detailed stage-level logs")
 		fmt.Fprintln(out, "  -base-dir string")
 		fmt.Fprintln(out, "        base directory for compact outputs (findings/results/state)")
+		fmt.Fprintf(out, "  -batch-size int\n        number of targets per internal batch (default %d)\n", cfg.BatchSize)
 		fmt.Fprintf(out, "  -target-workers int\n        number of targets to scan in parallel (default %d)\n", scanCfg.TargetWorkers)
 		fmt.Fprintf(out, "  -katana-bin string\n        path to katana binary (default %q)\n", scanCfg.KatanaBin)
 		fmt.Fprintf(out, "  -shuji-bin string\n        path to shuji binary (default %q)\n", processCfg.ShujiBin)
@@ -149,6 +152,9 @@ func ParseConfig(args []string) (Config, error) {
 	processCfg.BaseDir = filepath.Clean(processCfg.BaseDir)
 	if processCfg.ProcessWorkers < 1 {
 		return Config{}, errors.New("process-workers must be >= 1")
+	}
+	if cfg.BatchSize < 1 {
+		return Config{}, errors.New("batch-size must be >= 1")
 	}
 	processCfg.FeishuWebhook = strings.TrimSpace(processCfg.FeishuWebhook)
 

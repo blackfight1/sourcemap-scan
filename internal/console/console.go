@@ -34,6 +34,10 @@ func Pipelinef(format string, args ...any) {
 	write(os.Stderr, green, "pipeline", format, args...)
 }
 
+func Batchf(format string, args ...any) {
+	write(os.Stderr, magenta, "batch", format, args...)
+}
+
 func Warnf(format string, args ...any) {
 	write(os.Stderr, yellow, "warn", format, args...)
 }

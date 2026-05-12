@@ -39,6 +39,7 @@ go build -o sourcemap-scan ./cmd/sourcemap-scan
 ./sourcemap-scan process -i findings.jsonl -base-dir /opt/sourcemap/data
 ./sourcemap-scan pipeline -u https://target.tld -base-dir /opt/sourcemap/run
 ./sourcemap-scan pipeline -l targets.txt -base-dir /opt/sourcemap/batch -target-workers 10 -process-workers 4
+./sourcemap-scan pipeline -l targets.txt -base-dir /opt/sourcemap/run-all
 ```
 
 Main commands:
@@ -102,6 +103,7 @@ The pipeline stage:
 4. Processes sourcemaps concurrently with `-process-workers`
 5. Reuses `base-dir/findings`, `base-dir/results`, and `base-dir/state` as the default compact output layout
 6. Writes `base-dir/work` only when `-keep-artifacts` is enabled
+7. Automatically splits large target files into internal batches of `10000` targets by default
 
 Batch concurrency model:
 
@@ -111,6 +113,14 @@ Batch concurrency model:
   Number of JS assets checked in parallel inside each target
 - `-process-workers`
   Number of sourcemaps restored and scanned in parallel
+
+Internal batch model:
+
+- `-batch-size`
+  Number of targets per internal batch inside one `pipeline` run
+- Default is `10000`
+- When the target count exceeds one batch, outputs are automatically written under `base-dir/batches/batch-xxxxx/`
+- Each batch writes `results/batch-summary.json` for quick inspection and recovery
 
 Failure handling:
 
@@ -134,6 +144,22 @@ base-dir/
     summaries.jsonl
   state/
     processed-maps.txt
+
+When internal batching is used:
+
+```text
+base-dir/
+  batches/
+    batch-00000/
+      findings/
+      results/
+        summaries.jsonl
+        batch-summary.json
+      state/
+        processed-maps.txt
+    batch-00001/
+      ...
+```
 ```
 
 Artifacts kept only with `-keep-artifacts`:
