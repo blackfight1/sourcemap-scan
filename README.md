@@ -120,7 +120,7 @@ Internal batch model:
   Number of targets per internal batch inside one `pipeline` run
 - Default is `10000`
 - When the target count exceeds one batch, outputs are automatically written under `base-dir/batches/batch-xxxxx/`
-- Each batch writes `results/batch-summary.json` for quick inspection and recovery
+- A single final `results/pipeline-summary.json` is written under the root `base-dir`
 
 Failure handling:
 
@@ -142,6 +142,7 @@ base-dir/
     findings-*.jsonl
   results/
     summaries.jsonl
+    pipeline-summary.json
   state/
     processed-maps.txt
 
@@ -154,7 +155,6 @@ base-dir/
       findings/
       results/
         summaries.jsonl
-        batch-summary.json
       state/
         processed-maps.txt
     batch-00001/

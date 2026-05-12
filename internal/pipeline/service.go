@@ -55,6 +55,23 @@ type batchSummary struct {
 	FindingsPath string `json:"findings_path"`
 }
 
+type pipelineSummary struct {
+	GeneratedAt   string         `json:"generated_at"`
+	BaseDir       string         `json:"base_dir"`
+	BatchSize     int            `json:"batch_size"`
+	BatchesTotal  int            `json:"batches_total"`
+	BatchesFailed int            `json:"batches_failed"`
+	Targets       int            `json:"targets"`
+	Discovered    int64          `json:"discovered"`
+	Processed     int64          `json:"processed"`
+	Skipped       int64          `json:"skipped"`
+	Failed        int64          `json:"failed"`
+	Hits          int64          `json:"hits"`
+	Verified      int64          `json:"verified"`
+	Notified      int64          `json:"notified"`
+	Batches       []batchSummary `json:"batches"`
+}
+
 func NewService(cfg Config) (*Service, error) {
 	return &Service{cfg: cfg}, nil
 }
@@ -68,6 +85,7 @@ func (s *Service) Run(ctx context.Context) error {
 
 	var overall runStats
 	var failedBatches int
+	summaries := make([]batchSummary, 0, totalBatches)
 
 	for idx, targets := range batches {
 		select {
@@ -113,6 +131,23 @@ func (s *Service) Run(ctx context.Context) error {
 		stats.BatchTotal = totalBatches
 		stats.BatchFrom = targetFrom
 		stats.BatchTo = targetTo
+		summaries = append(summaries, batchSummary{
+			BatchIndex:   stats.BatchIndex,
+			BatchTotal:   stats.BatchTotal,
+			TargetFrom:   stats.BatchFrom,
+			TargetTo:     stats.BatchTo,
+			Targets:      stats.Targets,
+			Discovered:   stats.Discovered,
+			Processed:    stats.Processed,
+			Skipped:      stats.Skipped,
+			Failed:       stats.Failed,
+			Hits:         stats.Hits,
+			Verified:     stats.Verified,
+			Notified:     stats.Notified,
+			FinishedAt:   time.Now().UTC().Format(time.RFC3339),
+			BaseDir:      stats.BaseDir,
+			FindingsPath: stats.FindingsPath,
+		})
 
 		overall.Targets += stats.Targets
 		overall.Discovered += stats.Discovered
@@ -122,10 +157,6 @@ func (s *Service) Run(ctx context.Context) error {
 		overall.Hits += stats.Hits
 		overall.Verified += stats.Verified
 		overall.Notified += stats.Notified
-
-		if writeErr := writeBatchSummary(batchBaseDir, stats); writeErr != nil {
-			console.Warnf("batch %d/%d summary write failed: %v", batchNumber, totalBatches, writeErr)
-		}
 
 		if err != nil {
 			failedBatches++
@@ -168,6 +199,25 @@ func (s *Service) Run(ctx context.Context) error {
 			overall.Verified,
 			overall.Notified,
 		)
+	}
+
+	if writeErr := writePipelineSummary(s.cfg.Process.BaseDir, pipelineSummary{
+		GeneratedAt:   time.Now().UTC().Format(time.RFC3339),
+		BaseDir:       s.cfg.Process.BaseDir,
+		BatchSize:     s.cfg.BatchSize,
+		BatchesTotal:  totalBatches,
+		BatchesFailed: failedBatches,
+		Targets:       overall.Targets,
+		Discovered:    overall.Discovered,
+		Processed:     overall.Processed,
+		Skipped:       overall.Skipped,
+		Failed:        overall.Failed,
+		Hits:          overall.Hits,
+		Verified:      overall.Verified,
+		Notified:      overall.Notified,
+		Batches:       summaries,
+	}); writeErr != nil {
+		console.Warnf("pipeline summary write failed: %v", writeErr)
 	}
 
 	if failedBatches > 0 {
@@ -309,27 +359,9 @@ func resolveFindingsPath(cfg Config) (string, error) {
 	return filepath.Join(cfg.Process.BaseDir, "findings", name), nil
 }
 
-func writeBatchSummary(baseDir string, stats runStats) error {
+func writePipelineSummary(baseDir string, summary pipelineSummary) error {
 	if err := os.MkdirAll(filepath.Join(baseDir, "results"), 0o755); err != nil {
 		return err
-	}
-
-	summary := batchSummary{
-		BatchIndex:   stats.BatchIndex,
-		BatchTotal:   stats.BatchTotal,
-		TargetFrom:   stats.BatchFrom,
-		TargetTo:     stats.BatchTo,
-		Targets:      stats.Targets,
-		Discovered:   stats.Discovered,
-		Processed:    stats.Processed,
-		Skipped:      stats.Skipped,
-		Failed:       stats.Failed,
-		Hits:         stats.Hits,
-		Verified:     stats.Verified,
-		Notified:     stats.Notified,
-		FinishedAt:   time.Now().UTC().Format(time.RFC3339),
-		BaseDir:      stats.BaseDir,
-		FindingsPath: stats.FindingsPath,
 	}
 
 	data, err := json.MarshalIndent(summary, "", "  ")
@@ -337,7 +369,7 @@ func writeBatchSummary(baseDir string, stats runStats) error {
 		return err
 	}
 
-	path := filepath.Join(baseDir, "results", "batch-summary.json")
+	path := filepath.Join(baseDir, "results", "pipeline-summary.json")
 	return os.WriteFile(path, append(data, '\n'), 0o644)
 }
 
