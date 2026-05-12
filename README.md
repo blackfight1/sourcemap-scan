@@ -133,6 +133,7 @@ Default notifications:
 - Feishu webhook is built in by default
 - Only `Verified=true` TruffleHog results are sent
 - Notification payload is an interactive card with target, detector, secret redacted value, asset URL, map URL, bundle file, and source file
+- The `pipeline` command also sends one final completion notification after the whole run finishes
 
 Default output layout:
 

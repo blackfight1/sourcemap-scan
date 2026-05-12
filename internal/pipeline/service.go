@@ -1,12 +1,15 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -220,6 +223,35 @@ func (s *Service) Run(ctx context.Context) error {
 		console.Warnf("pipeline summary write failed: %v", writeErr)
 	}
 
+	sent, notifyErr := s.notifyPipelineCompletion(ctx, pipelineSummary{
+		GeneratedAt:   time.Now().UTC().Format(time.RFC3339),
+		BaseDir:       s.cfg.Process.BaseDir,
+		BatchSize:     s.cfg.BatchSize,
+		BatchesTotal:  totalBatches,
+		BatchesFailed: failedBatches,
+		Targets:       overall.Targets,
+		Discovered:    overall.Discovered,
+		Processed:     overall.Processed,
+		Skipped:       overall.Skipped,
+		Failed:        overall.Failed,
+		Hits:          overall.Hits,
+		Verified:      overall.Verified,
+		Notified:      overall.Notified,
+		Batches:       summaries,
+	})
+	if notifyErr != nil {
+		console.Warnf("pipeline completion notify failed: %v", notifyErr)
+	} else if sent {
+		console.Batchf(
+			"completion notified batches=%d targets=%d hits=%d verified=%d notified=%d",
+			totalBatches,
+			overall.Targets,
+			overall.Hits,
+			overall.Verified,
+			overall.Notified,
+		)
+	}
+
 	if failedBatches > 0 {
 		return fmt.Errorf("pipeline finished with %d failed batch(es)", failedBatches)
 	}
@@ -371,6 +403,89 @@ func writePipelineSummary(baseDir string, summary pipelineSummary) error {
 
 	path := filepath.Join(baseDir, "results", "pipeline-summary.json")
 	return os.WriteFile(path, append(data, '\n'), 0o644)
+}
+
+func (s *Service) notifyPipelineCompletion(ctx context.Context, summary pipelineSummary) (bool, error) {
+	webhook := strings.TrimSpace(s.cfg.Process.FeishuWebhook)
+	if webhook == "" {
+		return false, nil
+	}
+
+	status := "success"
+	template := "green"
+	if summary.BatchesFailed > 0 || summary.Failed > 0 {
+		status = "completed_with_failures"
+		template = "orange"
+	}
+
+	payload := map[string]any{
+		"msg_type": "interactive",
+		"card": map[string]any{
+			"config": map[string]any{
+				"wide_screen_mode": true,
+			},
+			"header": map[string]any{
+				"template": template,
+				"title": map[string]any{
+					"tag":     "plain_text",
+					"content": fmt.Sprintf("sourcemap-scan finished: %s", status),
+				},
+			},
+			"elements": []map[string]any{
+				{
+					"tag": "div",
+					"text": map[string]any{
+						"tag": "lark_md",
+						"content": strings.Join([]string{
+							fmt.Sprintf("**Base Dir**: `%s`", summary.BaseDir),
+							fmt.Sprintf("**Batches**: `%d` total / `%d` failed", summary.BatchesTotal, summary.BatchesFailed),
+							fmt.Sprintf("**Targets**: `%d`", summary.Targets),
+							fmt.Sprintf("**Findings**: `%d`", summary.Discovered),
+							fmt.Sprintf("**Processed**: `%d`", summary.Processed),
+							fmt.Sprintf("**Skipped**: `%d`", summary.Skipped),
+							fmt.Sprintf("**Map Failed**: `%d`", summary.Failed),
+							fmt.Sprintf("**Hits**: `%d`", summary.Hits),
+							fmt.Sprintf("**Verified**: `%d`", summary.Verified),
+							fmt.Sprintf("**Secret Notifications**: `%d`", summary.Notified),
+						}, "\n"),
+					},
+				},
+				{
+					"tag": "note",
+					"elements": []map[string]any{
+						{
+							"tag":     "plain_text",
+							"content": fmt.Sprintf("Finished: %s UTC", strings.TrimSuffix(summary.GeneratedAt, "Z")),
+						},
+					},
+				},
+			},
+		},
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return false, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, webhook, bytes.NewReader(body))
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return false, fmt.Errorf("unexpected status code %d", resp.StatusCode)
+	}
+
+	return true, nil
 }
 
 func splitTargets(targets []string, batchSize int) [][]string {
