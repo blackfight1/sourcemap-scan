@@ -1,141 +1,136 @@
 # sourcemap-scan
 
-A Go CLI for finding exposed JavaScript sourcemaps and running a full post-processing pipeline with `shuji` and `trufflehog`.
+一个用 Go 编写的 CLI 工具，用于批量发现网站暴露的 JavaScript sourcemap，并对还原后的源码做 secret 检测。
 
-## Current Scope
+核心流程：
 
-This tool uses an installed `katana` binary to discover JavaScript assets, then validates exposed sourcemaps.
+`katana` 抓 JS -> 识别 `.map` -> `shuji` 还原源码 -> `trufflehog` 扫描 -> 飞书通知 `Verified=true`
 
-Implemented discovery methods:
+## 功能
 
-- JavaScript tail comment parsing for `sourceMappingURL`
-- `SourceMap` and `X-SourceMap` response headers
-- Adjacent `.js.map` guessing when no explicit sourcemap hint exists
+- 支持单目标和批量目标
+- 支持 3 种 sourcemap 识别方式
+  - JS 尾部 `sourceMappingURL`
+  - `SourceMap` / `X-SourceMap` 响应头
+  - `.js.map` 邻接猜测
+- 支持批量自动分批
+  - 默认 `10000` 目标一批
+- 支持 `shuji` 还原源码
+- 支持 `trufflehog filesystem --json` 扫描
+- 只对 `Verified=true` 的 secret 发飞书通知
+- 全部扫描结束后会再发一条任务完成通知
 
-Validation checks:
+## 依赖
 
-- HTTP `200` response
-- Reject obvious HTML responses
-- JSON parsing
-- Required sourcemap fields: `version`, `sources`, `mappings`
+运行环境建议为 Linux VPS。
 
-## Requirements
+需要提前安装：
 
-- Go 1.22+
-- Linux VPS runtime target
-- `katana` installed and available in `PATH`, or passed with `-katana-bin`
+- `katana`
+- `shuji`
+- `trufflehog`
 
-## Build
+Go 构建版本：
+
+- `Go 1.22+`
+
+## 编译
 
 ```bash
 go build -o sourcemap-scan ./cmd/sourcemap-scan
 ```
 
-## Usage
+## 推荐命令
+
+### 1. 单目标完整扫描
 
 ```bash
-./sourcemap-scan -u https://target.tld
-./sourcemap-scan -l targets.txt
-./sourcemap-scan process -i findings.jsonl -base-dir /opt/sourcemap/data
-./sourcemap-scan pipeline -u https://target.tld -base-dir /opt/sourcemap/run
-./sourcemap-scan pipeline -l targets.txt -base-dir /opt/sourcemap/batch -target-workers 10 -process-workers 4
-./sourcemap-scan pipeline -l targets.txt -base-dir /opt/sourcemap/run-all
+sourcemap-scan pipeline -u https://target.tld -base-dir /tmp/smap-run
 ```
 
-Main commands:
-
-- `sourcemap-scan`
-  Scan only. Outputs findings JSONL.
-- `sourcemap-scan process`
-  Process existing findings JSONL with `shuji` and `trufflehog`.
-- `sourcemap-scan pipeline`
-  One command from target list to verified secret notification.
-
-## Process Subcommand
-
-The `process` subcommand keeps `shuji` and `trufflehog` as external tools, but moves the post-processing orchestration into Go.
-
-Example:
+### 2. 批量扫描
 
 ```bash
-./sourcemap-scan process \
-  -i findings.jsonl \
-  -base-dir /opt/sourcemap/data \
-  -shuji-bin /usr/bin/shuji \
-  -trufflehog-bin /usr/local/bin/trufflehog \
-  -process-workers 2
+sourcemap-scan pipeline -l targets.txt -base-dir /root/smap-run
 ```
 
-The process stage:
-
-1. Reads `findings.jsonl`
-2. Skips already processed `map_url` values
-3. Downloads each `.map`
-4. Restores source via `shuji`
-5. Scans restored files via `trufflehog filesystem --json`
-6. Keeps all TruffleHog hits in the summary JSONL
-7. Sends Feishu notifications only for `Verified=true` results
-8. Appends one compact line per processed map into `results/summaries.jsonl`
-9. Keeps per-map artifacts only when `-keep-artifacts` is enabled
-
-## Pipeline Subcommand
-
-The `pipeline` subcommand is the one-command Go workflow. It does not shell out to wrapper scripts for orchestration.
-
-Example:
+### 3. 适合 4H4G VPS 的推荐命令
 
 ```bash
-./sourcemap-scan pipeline \
-  -l targets.txt \
-  -base-dir /opt/sourcemap/run \
-  -katana-bin /usr/local/bin/katana \
-  -shuji-bin /usr/bin/shuji \
-  -trufflehog-bin /usr/local/bin/trufflehog \
-  -target-workers 8 \
-  -process-workers 3
+sourcemap-scan pipeline \
+  -l /root/bugbounty-program/bugcrowd/bc-alive.txt \
+  -base-dir /root/bugbounty-program/run-bugcrowd \
+  -target-workers 4 \
+  -process-workers 2 \
+  -scan-workers 12 \
+  -katana-concurrency 15 \
+  -katana-parallelism 4 \
+  -katana-rate-limit 40
 ```
 
-The pipeline stage:
+如果机器压力太大，再降回：
 
-1. Starts the scan stage
-2. Writes findings JSONL to `-o`, or auto-generates one under `base-dir/findings/`
-3. Streams each finding directly into the Go `process` stage as soon as it is discovered
-4. Processes sourcemaps concurrently with `-process-workers`
-5. Reuses `base-dir/findings`, `base-dir/results`, and `base-dir/state` as the default compact output layout
-6. Writes `base-dir/work` only when `-keep-artifacts` is enabled
-7. Automatically splits large target files into internal batches of `10000` targets by default
+```bash
+-target-workers 2 -process-workers 1 -scan-workers 8
+```
 
-Batch concurrency model:
+### 4. 只扫描，不做还原和 secret 检测
 
-- `-target-workers`
-  Number of targets scanned in parallel
-- `-scan-workers`
-  Number of JS assets checked in parallel inside each target
-- `-process-workers`
-  Number of sourcemaps restored and scanned in parallel
+```bash
+sourcemap-scan -l targets.txt -o findings.jsonl
+```
 
-Internal batch model:
+### 5. 对已有 findings 二次处理
 
+```bash
+sourcemap-scan process -i findings.jsonl -base-dir /root/smap-process
+```
+
+## 常用参数
+
+### `pipeline`
+
+- `-u`
+  单目标 URL
+- `-l`
+  目标文件，一行一个 URL
+- `-base-dir`
+  输出目录
 - `-batch-size`
-  Number of targets per internal batch inside one `pipeline` run
-- Default is `10000`
-- When the target count exceeds one batch, outputs are automatically written under `base-dir/batches/batch-xxxxx/`
-- A single final `results/pipeline-summary.json` is written under the root `base-dir`
+  每批目标数量，默认 `10000`
+- `-target-workers`
+  目标级并发
+- `-scan-workers`
+  单目标内 JS 扫描并发
+- `-process-workers`
+  sourcemap 处理并发
+- `-katana-bin`
+  `katana` 路径
+- `-shuji-bin`
+  `shuji` 路径
+- `-trufflehog-bin`
+  `trufflehog` 路径
+- `-feishu-webhook`
+  飞书 webhook
+- `-verbose`
+  输出更详细日志
 
-Failure handling:
+### `process`
 
-- If one target fails during the scan stage, the pipeline skips that target and continues with the rest
-- If one sourcemap fails during processing, the rest of the queue continues
-- The final exit code is non-zero when any target or finding fails
+- `-i`
+  findings JSONL 文件
+- `-base-dir`
+  输出目录
+- `-process-workers`
+  处理并发
+- `-keep-artifacts`
+  保留 map、summary、trufflehog 原始输出
+- `-keep-restored`
+  保留还原后的源码目录
 
-Default notifications:
+## 输出目录
 
-- Feishu webhook is built in by default
-- Only `Verified=true` TruffleHog results are sent
-- Notification payload is an interactive card with target, detector, secret redacted value, asset URL, map URL, bundle file, and source file
-- The `pipeline` command also sends one final completion notification after the whole run finishes
-
-Default output layout:
+默认输出结构：
 
 ```text
 base-dir/
@@ -146,8 +141,9 @@ base-dir/
     pipeline-summary.json
   state/
     processed-maps.txt
+```
 
-When internal batching is used:
+批量自动分批时：
 
 ```text
 base-dir/
@@ -160,77 +156,71 @@ base-dir/
         processed-maps.txt
     batch-00001/
       ...
-```
+  results/
+    pipeline-summary.json
 ```
 
-Artifacts kept only with `-keep-artifacts`:
+说明：
+
+- `findings-*.jsonl`
+  扫描阶段找到的有效 sourcemap
+- `summaries.jsonl`
+  每个 sourcemap 处理后的结果
+- `pipeline-summary.json`
+  整个任务的总汇总
+- `processed-maps.txt`
+  已处理过的 map 状态
+
+## 关于反编译文件保存位置
+
+默认情况下：
+
+- sourcemap 会先下载到临时目录
+- `shuji` 还原源码后立即交给 `trufflehog` 扫描
+- 扫描完成后临时目录会删除
+
+也就是说：
+
+**默认不会长期保留还原后的源码。**
+
+如果要保留，请使用：
+
+```bash
+-keep-artifacts -keep-restored
+```
+
+保留后目录在：
 
 ```text
-base-dir/
-  work/
-    <host>/<hash>/
-      map/
-      restored/
-      summary.json
-      trufflehog.raw.jsonl
+base-dir/work/<host>/<hash>/
 ```
 
-## Example Output
+## 通知逻辑
 
-Each finding is emitted as one JSON line:
+飞书通知分两类：
 
-```json
-{
-  "target": "https://target.tld",
-  "asset_url": "https://target.tld/static/app.js",
-  "map_url": "https://target.tld/static/app.js.map",
-  "requested_map_url": "https://target.tld/static/app.js.map",
-  "discovered_by": "js_comment",
-  "source_mapping_url_raw": "app.js.map",
-  "status_code": 200,
-  "content_type": "application/json",
-  "sources_count": 42,
-  "names_count": 1337,
-  "has_sources_content": true,
-  "file": "app.js"
-}
+1. `Verified=true` 的 secret 实时通知
+2. 全部扫描结束后的任务完成通知
+
+如果不想通知，可以把 webhook 置空：
+
+```bash
+-feishu-webhook ''
 ```
 
-Each processed sourcemap appends one line to `results/summaries.jsonl`:
+## 建议
 
-```json
-{
-  "target": "https://target.tld",
-  "target_host": "target.tld",
-  "asset_url": "https://target.tld/static/app.js",
-  "map_url": "https://target.tld/static/app.js.map",
-  "file": "app.js",
-  "discovered_by": "js_comment",
-  "sources_count": 42,
-  "names_count": 1337,
-  "has_sources_content": true,
-  "processed_at": "2026-05-11T08:00:00Z",
-  "restore_success": true,
-  "trufflehog_success": true,
-  "hits_total": 3,
-  "verified_hits": 1,
-  "notified": 1,
-  "hits": [
-    {
-      "detector": "PayPal",
-      "verified": true,
-      "file_path": "src/config/payments.ts",
-      "redacted": "A***Z",
-      "notified": true
-    }
-  ]
-}
+- 长时间批量任务建议用 `tmux`
+- 大规模跑时优先用 `pipeline`
+- 先看 `results/pipeline-summary.json`
+- 如果想保留还原源码，再开 `-keep-artifacts -keep-restored`
+
+## 例子
+
+查看帮助：
+
+```bash
+sourcemap-scan -h
+sourcemap-scan pipeline -h
+sourcemap-scan process -h
 ```
-
-## Notes
-
-- The scanner only targets `.js` and `.mjs` assets for now.
-- `data:` sourcemap URLs are intentionally ignored because they are not exposed remote `.map` files.
-- The tool uses a tail-range fetch first and falls back to reading the returned body as needed by the server response.
-- `-target-workers` controls parallel targets, while `-scan-workers` controls per-target JavaScript scanning.
-- On Linux VPS, use `tmux` or `screen` if you want the pipeline to keep running after disconnecting.
