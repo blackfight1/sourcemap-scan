@@ -59,9 +59,25 @@ sourcemap-scan targets.txt -no-katana
 
 # 打到屏幕
 sourcemap-scan targets.txt -o -
+
+# 飞书总结（需先配置 webhook，见下方；未配置则跳过）
+sourcemap-scan targets.txt
+sourcemap-scan targets.txt -no-feishu
 ```
 
 默认输出 **`findings.jsonl`**，目标并发 **3**。
+
+扫描结束后如已配置飞书 webhook，会发一条总结。**不要把真实 webhook 写进仓库**，优先级：
+
+1. `-feishu-webhook URL`
+2. 环境变量 `FEISHU_WEBHOOK`
+3. 本地文件 `.feishu_webhook`（cwd 或二进制同目录，已 gitignore）
+
+```bash
+# VPS 示例（仅本机）
+echo 'https://open.feishu.cn/open-apis/bot/v2/hook/<token>' > /root/tools/sourcemap-scan/.feishu_webhook
+chmod 600 /root/tools/sourcemap-scan/.feishu_webhook
+```
 
 `targets.txt` 示例：
 
@@ -83,6 +99,8 @@ b.example.com
 | `-no-waymore` | 关闭 waymore | |
 | `-no-katana` | 关闭 katana | |
 | `-waymore-per-host` | 每个子域单独跑 waymore（慢） | off |
+| `-feishu-webhook` | 扫描完成飞书 webhook | off（或 env / `.feishu_webhook`） |
+| `-no-feishu` | 关闭飞书总结 | off |
 
 ## 输出示例
 

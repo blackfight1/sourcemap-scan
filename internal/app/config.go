@@ -39,7 +39,15 @@ type Config struct {
 	MaxJSBytes        int64
 	MaxMapBytes       int64
 	UserAgent         string
+	// FeishuWebhook: post-scan summary. Empty disables.
+	// Resolve order: -feishu-webhook > FEISHU_WEBHOOK env > local .feishu_webhook file.
+	// Never ship a real webhook URL in the repo.
+	FeishuWebhook string
+	NoFeishu      bool
 }
+
+// localFeishuWebhookFile is gitignored; place it next to the binary or in cwd on the VPS.
+const localFeishuWebhookFile = ".feishu_webhook"
 
 func ParseConfig(args []string) (Config, error) {
 	fs := flag.NewFlagSet("sourcemap-scan", flag.ContinueOnError)
@@ -81,6 +89,8 @@ func ParseConfig(args []string) (Config, error) {
 	fs.Int64Var(&cfg.MaxJSBytes, "max-js-bytes", 16*1024*1024, "max JS bytes")
 	fs.Int64Var(&cfg.MaxMapBytes, "max-map-bytes", 10*1024*1024, "max map bytes")
 	fs.StringVar(&cfg.UserAgent, "user-agent", "sourcemap-scan/0.1", "User-Agent")
+	fs.StringVar(&cfg.FeishuWebhook, "feishu-webhook", "", "Feishu bot webhook URL (scan summary); else FEISHU_WEBHOOK or .feishu_webhook")
+	fs.BoolVar(&cfg.NoFeishu, "no-feishu", false, "disable Feishu summary notify")
 
 	fs.Usage = func() {
 		fmt.Fprint(fs.Output(), `sourcemap-scan — collect JS (waymore+katana) and find sourcemaps
@@ -99,6 +109,13 @@ Common flags:
   -no-katana         only waymore
   -no-waymore        only katana
   -waymore-per-host  waymore each host separately (slow)
+  -feishu-webhook URL  Feishu summary after scan
+  -no-feishu           disable Feishu notify
+
+Feishu config (first match wins):
+  1) -feishu-webhook URL
+  2) env FEISHU_WEBHOOK
+  3) local file .feishu_webhook (cwd or binary dir; do not commit)
 
 Notes:
   By default waymore runs once per root domain (dell.com), not each subdomain.
@@ -170,6 +187,18 @@ Examples:
 		cfg.WaymoreExtraArgs = strings.Fields(waymoreExtraArgs)
 	}
 
+	if cfg.NoFeishu {
+		cfg.FeishuWebhook = ""
+	} else {
+		cfg.FeishuWebhook = strings.TrimSpace(cfg.FeishuWebhook)
+		if cfg.FeishuWebhook == "" {
+			cfg.FeishuWebhook = strings.TrimSpace(os.Getenv("FEISHU_WEBHOOK"))
+		}
+		if cfg.FeishuWebhook == "" {
+			cfg.FeishuWebhook = loadLocalFeishuWebhook()
+		}
+	}
+
 	if err := ValidateCollectorConfig(&cfg); err != nil {
 		return Config{}, err
 	}
@@ -179,8 +208,47 @@ Examples:
 		outLabel = "stdout"
 	}
 	console.Scanf("targets=%d output=%s concurrency=%d", len(cfg.Targets), outLabel, cfg.TargetWorkers)
+	if cfg.FeishuWebhook != "" {
+		console.Scanf("feishu notify: enabled")
+	} else {
+		console.Scanf("feishu notify: disabled")
+	}
 
 	return cfg, nil
+}
+
+// loadLocalFeishuWebhook reads a single-line webhook from .feishu_webhook
+// next to the executable or in the current working directory.
+func loadLocalFeishuWebhook() string {
+	candidates := make([]string, 0, 3)
+	if exe, err := os.Executable(); err == nil {
+		candidates = append(candidates, filepath.Join(filepath.Dir(exe), localFeishuWebhookFile))
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		candidates = append(candidates, filepath.Join(cwd, localFeishuWebhookFile))
+	}
+	candidates = append(candidates, localFeishuWebhookFile)
+
+	seen := make(map[string]struct{}, len(candidates))
+	for _, path := range candidates {
+		path = filepath.Clean(path)
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		line := strings.TrimSpace(string(data))
+		if i := strings.IndexAny(line, "\r\n"); i >= 0 {
+			line = strings.TrimSpace(line[:i])
+		}
+		if line != "" && !strings.HasPrefix(line, "#") {
+			return line
+		}
+	}
+	return ""
 }
 
 // reorderArgs moves flags before positionals so `tool targets.txt -o out` works
@@ -192,6 +260,7 @@ func reorderArgs(args []string) []string {
 		"-no-katana": {}, "--no-katana": {},
 		"-no-waymore": {}, "--no-waymore": {},
 		"-waymore-per-host": {}, "--waymore-per-host": {},
+		"-no-feishu": {}, "--no-feishu": {},
 		"-h": {}, "--h": {}, "-help": {}, "--help": {},
 	}
 
@@ -212,9 +281,6 @@ func reorderArgs(args []string) []string {
 		// -flag=value
 		if strings.Contains(arg, "=") {
 			flags = append(flags, arg)
-			name := strings.SplitN(arg, "=", 2)[0]
-			// bool with explicit value still one token
-			_ = name
 			continue
 		}
 
@@ -223,7 +289,8 @@ func reorderArgs(args []string) []string {
 		if _, isBool := boolFlags[name]; isBool {
 			continue
 		}
-		// Non-bool flag may take the next token as its value.
+		// Non-bool flag may take the next token as its value
+		// (including empty string for -feishu-webhook "").
 		if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
 			i++
 			flags = append(flags, args[i])

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -13,10 +14,13 @@ import (
 	"sourcemap-scan/internal/httpx"
 	"sourcemap-scan/internal/jscollect"
 	"sourcemap-scan/internal/model"
+	"sourcemap-scan/internal/notify"
 	"sourcemap-scan/internal/output"
 	"sourcemap-scan/internal/sourcemap"
 	"sourcemap-scan/internal/waymore"
 )
+
+const feishuSampleLimit = 8
 
 type Service struct {
 	cfg        app.Config
@@ -37,6 +41,8 @@ func NewServiceWithEmitter(cfg app.Config, onFinding func(context.Context, model
 }
 
 func (s *Service) Run(ctx context.Context) error {
+	startedAt := time.Now()
+
 	writer, err := output.NewJSONLWriter(s.cfg.OutputPath)
 	if err != nil {
 		return err
@@ -60,6 +66,33 @@ func (s *Service) Run(ctx context.Context) error {
 	var failureCount atomic.Int64
 	var startedCount atomic.Int64
 	var activeCount atomic.Int64
+	var findingCount atomic.Int64
+	var sourcesContentCount atomic.Int64
+
+	var sampleMu sync.Mutex
+	sampleMaps := make([]string, 0, feishuSampleLimit)
+	sampleSeen := make(map[string]struct{}, feishuSampleLimit)
+
+	recordFinding := func(f model.Finding) {
+		findingCount.Add(1)
+		if f.HasSourcesContent {
+			sourcesContentCount.Add(1)
+		}
+		mapURL := f.MapURL
+		if mapURL == "" {
+			return
+		}
+		sampleMu.Lock()
+		defer sampleMu.Unlock()
+		if len(sampleMaps) >= feishuSampleLimit {
+			return
+		}
+		if _, ok := sampleSeen[mapURL]; ok {
+			return
+		}
+		sampleSeen[mapURL] = struct{}{}
+		sampleMaps = append(sampleMaps, mapURL)
+	}
 
 	doneSummary := make(chan struct{})
 	go func() {
@@ -82,12 +115,13 @@ func (s *Service) Run(ctx context.Context) error {
 					left = 0
 				}
 				console.Pipelinef(
-					"summary targets done=%d/%d running=%d left=%d failed=%d",
+					"summary targets done=%d/%d running=%d left=%d failed=%d maps=%d",
 					done,
 					total,
 					activeCount.Load(),
 					left,
 					failureCount.Load(),
+					findingCount.Load(),
 				)
 			}
 		}
@@ -114,7 +148,7 @@ func (s *Service) Run(ctx context.Context) error {
 					console.Dim(fmt.Sprintf("(remaining=%d)", total-current)),
 				)
 
-				if err := s.runTarget(ctx, writer, target, collectOpts); err != nil {
+				if err := s.runTarget(ctx, writer, target, collectOpts, recordFinding); err != nil {
 					activeCount.Add(-1)
 					failureCount.Add(1)
 					completed := successCount.Load() + failureCount.Load()
@@ -144,12 +178,16 @@ func (s *Service) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			close(jobs)
 			workerWG.Wait()
+			s.notifyFeishu(ctx, startedAt, successCount.Load(), failureCount.Load(), findingCount.Load(), sourcesContentCount.Load(), sampleMapsCopy(&sampleMu, sampleMaps))
 			return ctx.Err()
 		case jobs <- target:
 		}
 	}
 	close(jobs)
 	workerWG.Wait()
+
+	finishedSamples := sampleMapsCopy(&sampleMu, sampleMaps)
+	s.notifyFeishu(ctx, startedAt, successCount.Load(), failureCount.Load(), findingCount.Load(), sourcesContentCount.Load(), finishedSamples)
 
 	if err := ctx.Err(); err != nil {
 		return err
@@ -161,24 +199,71 @@ func (s *Service) Run(ctx context.Context) error {
 
 	if failureCount.Load() > 0 {
 		console.Warnf(
-			"targets total=%d success=%d failed=%d",
+			"targets total=%d success=%d failed=%d maps=%d",
 			len(s.cfg.Targets),
 			successCount.Load(),
 			failureCount.Load(),
+			findingCount.Load(),
 		)
 	} else {
 		console.Successf(
-			"targets total=%d success=%d failed=%d",
+			"targets total=%d success=%d failed=%d maps=%d",
 			len(s.cfg.Targets),
 			successCount.Load(),
 			failureCount.Load(),
+			findingCount.Load(),
 		)
 	}
 
 	return nil
 }
 
-func (s *Service) runTarget(ctx context.Context, writer *output.JSONLWriter, target string, opts jscollect.CollectOptions) (err error) {
+func sampleMapsCopy(mu *sync.Mutex, sample []string) []string {
+	mu.Lock()
+	defer mu.Unlock()
+	out := make([]string, len(sample))
+	copy(out, sample)
+	return out
+}
+
+func (s *Service) notifyFeishu(ctx context.Context, startedAt time.Time, success, failed, findings, withSources int64, samples []string) {
+	if strings.TrimSpace(s.cfg.FeishuWebhook) == "" {
+		return
+	}
+
+	// Use a detached timeout so cancel/timeout of the scan still allows notify.
+	notifyCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	_ = ctx // keep signature ready if callers pass deadline later
+
+	summary := notify.ScanSummary{
+		StartedAt:          startedAt,
+		FinishedAt:         time.Now(),
+		TargetsTotal:       len(s.cfg.Targets),
+		TargetsSuccess:     success,
+		TargetsFailed:      failed,
+		Findings:           findings,
+		WithSourcesContent: withSources,
+		OutputPath:         s.cfg.OutputPath,
+		SampleMapURLs:      samples,
+		DisableWaymore:     s.cfg.DisableWaymore,
+		DisableKatana:      s.cfg.DisableKatana,
+	}
+
+	if err := notify.SendFeishuSummary(notifyCtx, s.cfg.FeishuWebhook, summary); err != nil {
+		console.Warnf("feishu notify failed: %v", err)
+		return
+	}
+	console.Successf("feishu notify sent (maps=%d)", findings)
+}
+
+func (s *Service) runTarget(
+	ctx context.Context,
+	writer *output.JSONLWriter,
+	target string,
+	opts jscollect.CollectOptions,
+	onFinding func(model.Finding),
+) (err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			err = fmt.Errorf("panic while scanning target: %v", recovered)
@@ -282,6 +367,9 @@ func (s *Service) runTarget(ctx context.Context, writer *output.JSONLWriter, tar
 			continue
 		}
 		findingCount.Add(1)
+		if onFinding != nil {
+			onFinding(finding)
+		}
 	}
 
 	if firstErr != nil {

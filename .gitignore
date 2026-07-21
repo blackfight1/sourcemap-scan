@@ -1,4 +1,5 @@
-﻿/sourcemap-scan
+/sourcemap-scan
 /sourcemap-scan.exe
 *.exe
 .sourcemap-pipeline/
+.feishu_webhook
