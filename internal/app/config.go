@@ -7,8 +7,11 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
+
+	"sourcemap-scan/internal/console"
 )
 
 type Config struct {
@@ -22,6 +25,12 @@ type Config struct {
 	KatanaParallelism int
 	KatanaRateLimit   int
 	KatanaExtraArgs   []string
+	DisableKatana     bool
+	WaymoreBin        string
+	WaymoreNoSubs     bool
+	WaymoreTimeout    time.Duration
+	WaymoreExtraArgs  []string
+	DisableWaymore    bool
 	ScanWorkers       int
 	HTTPTimeout       time.Duration
 	TailBytes         int64
@@ -32,50 +41,68 @@ type Config struct {
 
 func ParseConfig(args []string) (Config, error) {
 	fs := flag.NewFlagSet("sourcemap-scan", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
 
 	cfg := Config{}
-	var extraArgs string
+	var katanaExtraArgs string
+	var waymoreExtraArgs string
 	var singleTarget string
 	var targetFile string
 
-	fs.StringVar(&singleTarget, "u", "", "single target URL")
-	fs.StringVar(&targetFile, "l", "", "file with target URLs, one per line")
-	fs.StringVar(&cfg.OutputPath, "o", "", "write findings as JSONL to this file (default: stdout)")
-	fs.BoolVar(&cfg.Verbose, "verbose", false, "print detailed stage-level logs")
-	fs.IntVar(&cfg.TargetWorkers, "target-workers", 2, "number of targets to scan in parallel")
-	fs.StringVar(&cfg.KatanaBin, "katana-bin", "katana", "path to katana binary")
-	fs.IntVar(&cfg.KatanaDepth, "katana-depth", 3, "katana crawl depth")
-	fs.IntVar(&cfg.KatanaConcurrency, "katana-concurrency", 10, "katana fetch concurrency")
-	fs.IntVar(&cfg.KatanaParallelism, "katana-parallelism", 3, "katana input parallelism")
-	fs.IntVar(&cfg.KatanaRateLimit, "katana-rate-limit", 30, "katana request rate limit per second")
-	fs.StringVar(&extraArgs, "katana-extra-args", "", "additional katana arguments, split on spaces")
-	fs.IntVar(&cfg.ScanWorkers, "scan-workers", 10, "number of JS scanning workers")
-	fs.DurationVar(&cfg.HTTPTimeout, "http-timeout", 15*time.Second, "HTTP timeout for JS and map fetches")
-	fs.Int64Var(&cfg.TailBytes, "tail-bytes", 8192, "number of bytes requested from the end of each JS asset")
-	fs.Int64Var(&cfg.MaxJSBytes, "max-js-bytes", 16*1024*1024, "maximum JS response bytes to read before aborting")
-	fs.Int64Var(&cfg.MaxMapBytes, "max-map-bytes", 10*1024*1024, "maximum map response bytes to read before aborting")
-	fs.StringVar(&cfg.UserAgent, "user-agent", "sourcemap-scan/0.1", "user agent used for JS and map requests")
+	// Keep the common surface tiny.
+	fs.StringVar(&singleTarget, "u", "", "single target (URL or domain)")
+	fs.StringVar(&targetFile, "l", "", "target list file")
+	fs.StringVar(&cfg.OutputPath, "o", "findings.jsonl", "output file (`-` = stdout)")
+	fs.BoolVar(&cfg.Verbose, "v", false, "verbose logs")
+	fs.BoolVar(&cfg.Verbose, "verbose", false, "verbose logs")
+	fs.IntVar(&cfg.TargetWorkers, "c", 3, "target concurrency")
+	fs.IntVar(&cfg.TargetWorkers, "target-workers", 3, "target concurrency")
+	fs.IntVar(&cfg.ScanWorkers, "w", 10, "per-target asset workers")
+	fs.IntVar(&cfg.ScanWorkers, "scan-workers", 10, "per-target asset workers")
+
+	fs.BoolVar(&cfg.DisableKatana, "no-katana", false, "disable katana")
+	fs.BoolVar(&cfg.DisableWaymore, "no-waymore", false, "disable waymore")
+
+	// Advanced (still available, hidden from short help)
+	fs.StringVar(&cfg.KatanaBin, "katana-bin", "katana", "katana binary")
+	fs.IntVar(&cfg.KatanaDepth, "katana-depth", 3, "katana depth")
+	fs.IntVar(&cfg.KatanaConcurrency, "katana-concurrency", 10, "katana concurrency")
+	fs.IntVar(&cfg.KatanaParallelism, "katana-parallelism", 3, "katana parallelism")
+	fs.IntVar(&cfg.KatanaRateLimit, "katana-rate-limit", 30, "katana rate limit")
+	fs.StringVar(&katanaExtraArgs, "katana-extra-args", "", "extra katana args")
+	fs.StringVar(&cfg.WaymoreBin, "waymore-bin", "waymore", "waymore binary")
+	fs.BoolVar(&cfg.WaymoreNoSubs, "waymore-no-subs", true, "waymore -n (no extra subs)")
+	fs.DurationVar(&cfg.WaymoreTimeout, "waymore-timeout", 20*time.Minute, "waymore timeout")
+	fs.StringVar(&waymoreExtraArgs, "waymore-extra-args", "", "extra waymore args")
+	fs.DurationVar(&cfg.HTTPTimeout, "http-timeout", 15*time.Second, "HTTP timeout")
+	fs.Int64Var(&cfg.TailBytes, "tail-bytes", 8192, "JS tail bytes")
+	fs.Int64Var(&cfg.MaxJSBytes, "max-js-bytes", 16*1024*1024, "max JS bytes")
+	fs.Int64Var(&cfg.MaxMapBytes, "max-map-bytes", 10*1024*1024, "max map bytes")
+	fs.StringVar(&cfg.UserAgent, "user-agent", "sourcemap-scan/0.1", "User-Agent")
 
 	fs.Usage = func() {
-		out := fs.Output()
-		fmt.Fprintf(out, "Usage: sourcemap-scan (-u https://target.tld | -l targets.txt) [options]\n\n")
-		fmt.Fprintln(out, "Main options:")
-		fmt.Fprintln(out, "  -u string")
-		fmt.Fprintln(out, "        single target URL")
-		fmt.Fprintln(out, "  -l string")
-		fmt.Fprintln(out, "        file with target URLs, one per line")
-		fmt.Fprintln(out, "  -o string")
-		fmt.Fprintln(out, "        write findings as JSONL to this file (default: stdout)")
-		fmt.Fprintln(out, "  -verbose")
-		fmt.Fprintln(out, "        print detailed stage-level logs")
-		fmt.Fprintf(out, "  -target-workers int\n        number of targets to scan in parallel (default %d)\n", cfg.TargetWorkers)
-		fmt.Fprintf(out, "  -katana-bin string\n        path to katana binary (default %q)\n", cfg.KatanaBin)
-		fmt.Fprintln(out)
-		fmt.Fprintln(out, "Examples:")
-		fmt.Fprintln(out, "  sourcemap-scan -u https://target.tld")
-		fmt.Fprintln(out, "  sourcemap-scan -l targets.txt -o findings.jsonl")
-		fmt.Fprintln(out)
-		fmt.Fprintln(out, "Advanced flags are still supported but intentionally omitted from this help.")
+		fmt.Fprint(fs.Output(), `sourcemap-scan — collect JS (waymore+katana) and find sourcemaps
+
+Usage:
+  sourcemap-scan <targets.txt>
+  sourcemap-scan <url-or-domain>
+  sourcemap-scan -l targets.txt
+  sourcemap-scan -u https://a.com
+
+Common flags:
+  -o file     output JSONL (default: findings.jsonl, use - for stdout)
+  -c N        target concurrency (default: 3)
+  -w N        asset workers per target (default: 10)
+  -v          verbose
+  -no-katana  only waymore
+  -no-waymore only katana
+
+Examples:
+  sourcemap-scan targets.txt
+  sourcemap-scan https://app.example.com
+  sourcemap-scan example.com -no-waymore
+  sourcemap-scan targets.txt -c 4 -o maps.jsonl
+`)
 	}
 
 	if err := fs.Parse(args); err != nil {
@@ -84,57 +111,151 @@ func ParseConfig(args []string) (Config, error) {
 
 	singleTarget = strings.TrimSpace(singleTarget)
 	targetFile = strings.TrimSpace(targetFile)
+	rest := fs.Args()
 
-	if (singleTarget == "" && targetFile == "") || (singleTarget != "" && targetFile != "") {
-		return Config{}, errors.New("use exactly one of -u or -l")
+	// Positional: file or one/more targets
+	if singleTarget == "" && targetFile == "" {
+		if len(rest) == 0 {
+			return Config{}, errors.New("need a target file or URL\n\n  sourcemap-scan targets.txt\n  sourcemap-scan https://example.com")
+		}
+		if len(rest) == 1 && looksLikeListFile(rest[0]) {
+			targetFile = rest[0]
+		} else {
+			// treat all positionals as targets
+			var err error
+			cfg.Targets, err = collectTargets(rest)
+			if err != nil {
+				return Config{}, err
+			}
+		}
+	} else if len(rest) > 0 {
+		return Config{}, errors.New("do not mix positional targets with -u/-l")
+	}
+
+	if singleTarget != "" && targetFile != "" {
+		return Config{}, errors.New("use only one of -u or -l")
 	}
 
 	var err error
-	if singleTarget != "" {
+	switch {
+	case len(cfg.Targets) > 0:
+		// already filled from positionals
+	case singleTarget != "":
 		cfg.Targets, err = collectTargets([]string{singleTarget})
-	} else {
+	case targetFile != "":
 		cfg.Targets, err = readTargetsFromFile(targetFile)
 	}
 	if err != nil {
 		return Config{}, err
 	}
 
-	if cfg.KatanaDepth < 1 {
-		return Config{}, errors.New("katana-depth must be >= 1")
-	}
-	if cfg.TargetWorkers < 1 {
-		return Config{}, errors.New("target-workers must be >= 1")
-	}
-	if cfg.KatanaConcurrency < 1 {
-		return Config{}, errors.New("katana-concurrency must be >= 1")
-	}
-	if cfg.KatanaParallelism < 1 {
-		return Config{}, errors.New("katana-parallelism must be >= 1")
-	}
-	if cfg.KatanaRateLimit < 1 {
-		return Config{}, errors.New("katana-rate-limit must be >= 1")
-	}
-	if cfg.ScanWorkers < 1 {
-		return Config{}, errors.New("scan-workers must be >= 1")
-	}
-	if cfg.TailBytes < 512 {
-		return Config{}, errors.New("tail-bytes must be >= 512")
-	}
-	if cfg.MaxJSBytes < cfg.TailBytes {
-		return Config{}, errors.New("max-js-bytes must be >= tail-bytes")
-	}
-	if cfg.MaxMapBytes < 1024 {
-		return Config{}, errors.New("max-map-bytes must be >= 1024")
-	}
-	if cfg.HTTPTimeout <= 0 {
-		return Config{}, errors.New("http-timeout must be > 0")
+	// Normalize output: empty or default path; "-" means stdout
+	cfg.OutputPath = strings.TrimSpace(cfg.OutputPath)
+	if cfg.OutputPath == "-" {
+		cfg.OutputPath = ""
 	}
 
-	if extraArgs != "" {
-		cfg.KatanaExtraArgs = strings.Fields(extraArgs)
+	if katanaExtraArgs != "" {
+		cfg.KatanaExtraArgs = strings.Fields(katanaExtraArgs)
 	}
+	if waymoreExtraArgs != "" {
+		cfg.WaymoreExtraArgs = strings.Fields(waymoreExtraArgs)
+	}
+
+	if err := ValidateCollectorConfig(&cfg); err != nil {
+		return Config{}, err
+	}
+
+	outLabel := cfg.OutputPath
+	if outLabel == "" {
+		outLabel = "stdout"
+	}
+	console.Scanf("targets=%d output=%s concurrency=%d", len(cfg.Targets), outLabel, cfg.TargetWorkers)
 
 	return cfg, nil
+}
+
+// ValidateCollectorConfig checks shared scan/collector settings.
+func ValidateCollectorConfig(cfg *Config) error {
+	if cfg.DisableKatana && cfg.DisableWaymore {
+		return errors.New("enable at least one of katana/waymore (remove -no-katana/-no-waymore)")
+	}
+	if !cfg.DisableKatana {
+		if cfg.KatanaDepth < 1 {
+			return errors.New("katana-depth must be >= 1")
+		}
+		if cfg.KatanaConcurrency < 1 {
+			return errors.New("katana-concurrency must be >= 1")
+		}
+		if cfg.KatanaParallelism < 1 {
+			return errors.New("katana-parallelism must be >= 1")
+		}
+		if cfg.KatanaRateLimit < 1 {
+			return errors.New("katana-rate-limit must be >= 1")
+		}
+		if strings.TrimSpace(cfg.KatanaBin) == "" {
+			return errors.New("katana-bin must not be empty")
+		}
+	}
+	if !cfg.DisableWaymore {
+		if strings.TrimSpace(cfg.WaymoreBin) == "" {
+			return errors.New("waymore-bin must not be empty")
+		}
+		if cfg.WaymoreTimeout < 0 {
+			return errors.New("waymore-timeout must be >= 0")
+		}
+		if cfg.WaymoreTimeout == 0 {
+			cfg.WaymoreTimeout = 20 * time.Minute
+		}
+	}
+	if cfg.TargetWorkers < 1 {
+		return errors.New("concurrency (-c) must be >= 1")
+	}
+	if cfg.ScanWorkers < 1 {
+		return errors.New("workers (-w) must be >= 1")
+	}
+	if cfg.TailBytes < 512 {
+		return errors.New("tail-bytes must be >= 512")
+	}
+	if cfg.MaxJSBytes < cfg.TailBytes {
+		return errors.New("max-js-bytes must be >= tail-bytes")
+	}
+	if cfg.MaxMapBytes < 1024 {
+		return errors.New("max-map-bytes must be >= 1024")
+	}
+	if cfg.HTTPTimeout <= 0 {
+		return errors.New("http-timeout must be > 0")
+	}
+	return nil
+}
+
+func looksLikeListFile(path string) bool {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return false
+	}
+	// URL-like is not a file list
+	if strings.Contains(path, "://") {
+		return false
+	}
+	// domain.tld without path separators → target, not file
+	if !strings.ContainsAny(path, `/\`) {
+		// if file exists, treat as list; else domain
+		if st, err := os.Stat(path); err == nil && !st.IsDir() {
+			return true
+		}
+		return false
+	}
+	if st, err := os.Stat(path); err == nil && !st.IsDir() {
+		return true
+	}
+	// path with separator that doesn't exist — still try as file later
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".txt", ".list", ".lst", ".csv":
+		return true
+	}
+	return false
 }
 
 func readTargetsFromFile(path string) ([]string, error) {
@@ -159,7 +280,7 @@ func readTargetsFromFile(path string) ([]string, error) {
 	}
 
 	if len(rawTargets) == 0 {
-		return nil, errors.New("target file did not contain any usable URLs")
+		return nil, errors.New("target file is empty")
 	}
 
 	return collectTargets(rawTargets)
@@ -170,27 +291,46 @@ func collectTargets(items []string) ([]string, error) {
 	targets := make([]string, 0, len(items))
 
 	for _, item := range items {
-		target := strings.TrimSpace(item)
-		if target == "" {
+		target, err := normalizeTarget(item)
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := seen[target]; ok {
 			continue
 		}
-
-		parsed, err := url.Parse(target)
-		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-			return nil, fmt.Errorf("invalid target URL: %q", target)
-		}
-
-		normalized := parsed.String()
-		if _, ok := seen[normalized]; ok {
-			continue
-		}
-		seen[normalized] = struct{}{}
-		targets = append(targets, normalized)
+		seen[target] = struct{}{}
+		targets = append(targets, target)
 	}
 
 	if len(targets) == 0 {
-		return nil, errors.New("no valid targets provided")
+		return nil, errors.New("no valid targets")
 	}
 
 	return targets, nil
+}
+
+// normalizeTarget accepts https://host, http://host, or bare domain → https://domain
+func normalizeTarget(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", errors.New("empty target")
+	}
+
+	// strip accidental quotes
+	raw = strings.Trim(raw, `"'`)
+
+	if !strings.Contains(raw, "://") {
+		// host or host/path
+		raw = "https://" + raw
+	}
+
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", fmt.Errorf("invalid target: %q", raw)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", fmt.Errorf("unsupported scheme in target: %q", raw)
+	}
+
+	return parsed.String(), nil
 }

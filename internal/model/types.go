@@ -6,6 +6,7 @@ type Finding struct {
 	MapURL              string `json:"map_url"`
 	RequestedMapURL     string `json:"requested_map_url,omitempty"`
 	DiscoveredBy        string `json:"discovered_by"`
+	JSSource            string `json:"js_source,omitempty"` // katana | waymore | both
 	SourceMappingURLRaw string `json:"source_mapping_url_raw,omitempty"`
 	StatusCode          int    `json:"status_code"`
 	ContentType         string `json:"content_type,omitempty"`

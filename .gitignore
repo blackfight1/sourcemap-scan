@@ -1,0 +1,4 @@
+﻿/sourcemap-scan
+/sourcemap-scan.exe
+*.exe
+.sourcemap-pipeline/

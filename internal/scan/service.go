@@ -11,7 +11,7 @@ import (
 	"sourcemap-scan/internal/app"
 	"sourcemap-scan/internal/console"
 	"sourcemap-scan/internal/httpx"
-	"sourcemap-scan/internal/katana"
+	"sourcemap-scan/internal/jscollect"
 	"sourcemap-scan/internal/model"
 	"sourcemap-scan/internal/output"
 	"sourcemap-scan/internal/sourcemap"
@@ -189,18 +189,18 @@ func (s *Service) runTarget(ctx context.Context, writer *output.JSONLWriter, tar
 		})
 	}
 
-	runner := katana.NewRunner(s.cfg, target)
-
-	jsURLs, err := runner.CollectJSURLs(targetCtx)
+	assets, err := jscollect.Collect(targetCtx, s.cfg, target)
 	if err != nil {
 		return err
 	}
 
-	if s.cfg.Verbose || len(jsURLs) > 0 {
-		console.Scanf("%s discovered %d JavaScript assets from katana", console.Highlight(target), len(jsURLs))
-	}
+	console.Scanf(
+		"%s collected %d unique assets (katana/waymore merged)",
+		console.Highlight(target),
+		len(assets),
+	)
 
-	jobs := make(chan string)
+	jobs := make(chan jscollect.Asset)
 	findings := make(chan model.Finding)
 
 	var workerWG sync.WaitGroup
@@ -211,12 +211,12 @@ func (s *Service) runTarget(ctx context.Context, writer *output.JSONLWriter, tar
 		workerWG.Add(1)
 		go func() {
 			defer workerWG.Done()
-			for assetURL := range jobs {
-				func(assetURL string) {
+			for asset := range jobs {
+				func(asset jscollect.Asset) {
 					defer func() {
 						if recovered := recover(); recovered != nil {
-							setTargetErr(fmt.Errorf("panic while scanning asset %s: %v", assetURL, recovered))
-							console.Failf("%s asset panic recovered for %s:\n%s", target, assetURL, debug.Stack())
+							setTargetErr(fmt.Errorf("panic while scanning asset %s: %v", asset.URL, recovered))
+							console.Failf("%s asset panic recovered for %s:\n%s", target, asset.URL, debug.Stack())
 						}
 					}()
 
@@ -227,9 +227,12 @@ func (s *Service) runTarget(ctx context.Context, writer *output.JSONLWriter, tar
 					}
 
 					scannedCount.Add(1)
-					assetFindings, err := s.scanAsset(targetCtx, target, assetURL)
+					assetFindings, err := s.scanAsset(targetCtx, target, asset)
 					if err != nil {
-						setTargetErr(fmt.Errorf("asset %s failed: %w", assetURL, err))
+						// Network/validation failures on single assets are non-fatal.
+						if s.cfg.Verbose {
+							console.Warnf("%s asset skip %s: %v", target, asset.URL, err)
+						}
 						return
 					}
 
@@ -240,18 +243,18 @@ func (s *Service) runTarget(ctx context.Context, writer *output.JSONLWriter, tar
 						case findings <- finding:
 						}
 					}
-				}(assetURL)
+				}(asset)
 			}
 		}()
 	}
 
 	go func() {
 		defer close(jobs)
-		for _, assetURL := range jsURLs {
+		for _, asset := range assets {
 			select {
 			case <-targetCtx.Done():
 				return
-			case jobs <- assetURL:
+			case jobs <- asset:
 			}
 		}
 	}()
@@ -275,14 +278,14 @@ func (s *Service) runTarget(ctx context.Context, writer *output.JSONLWriter, tar
 
 	if findingCount.Load() > 0 {
 		console.Successf(
-			"%s scanned %d JavaScript assets, found %d valid source maps",
+			"%s scanned %d assets, found %d valid source maps",
 			target,
 			scannedCount.Load(),
 			findingCount.Load(),
 		)
 	} else {
 		console.Scanf(
-			"%s scanned %d JavaScript assets, found %d valid source maps",
+			"%s scanned %d assets, found %d valid source maps",
 			target,
 			scannedCount.Load(),
 			findingCount.Load(),
@@ -302,8 +305,12 @@ func (s *Service) emitFinding(ctx context.Context, writer *output.JSONLWriter, f
 	return s.onFinding(ctx, finding)
 }
 
-func (s *Service) scanAsset(ctx context.Context, target string, assetURL string) ([]model.Finding, error) {
-	jsResp, err := s.httpClient.FetchTail(ctx, assetURL, s.cfg.TailBytes, s.cfg.MaxJSBytes)
+func (s *Service) scanAsset(ctx context.Context, target string, asset jscollect.Asset) ([]model.Finding, error) {
+	if asset.Kind == "map" {
+		return s.validateMapFinding(ctx, target, asset.URL, asset.URL, "direct_map", "", asset.Source)
+	}
+
+	jsResp, err := s.httpClient.FetchTail(ctx, asset.URL, s.cfg.TailBytes, s.cfg.MaxJSBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -328,26 +335,51 @@ func (s *Service) scanAsset(ctx context.Context, target string, assetURL string)
 		}
 		seen[candidate.URL] = struct{}{}
 
-		validation, err := sourcemap.ValidateRemoteMap(ctx, s.httpClient, candidate.URL, s.cfg.MaxMapBytes)
+		items, err := s.validateMapFinding(
+			ctx,
+			target,
+			jsResp.URL,
+			candidate.URL,
+			candidate.Method,
+			candidate.SourceMappingValue,
+			asset.Source,
+		)
 		if err != nil {
 			continue
 		}
-
-		findings = append(findings, model.Finding{
-			Target:              target,
-			AssetURL:            jsResp.URL,
-			MapURL:              validation.FinalURL,
-			RequestedMapURL:     candidate.URL,
-			DiscoveredBy:        candidate.Method,
-			SourceMappingURLRaw: candidate.SourceMappingValue,
-			StatusCode:          validation.StatusCode,
-			ContentType:         validation.ContentType,
-			SourcesCount:        validation.SourcesCount,
-			NamesCount:          validation.NamesCount,
-			HasSourcesContent:   validation.HasSourcesContent,
-			File:                validation.File,
-		})
+		findings = append(findings, items...)
 	}
 
 	return findings, nil
+}
+
+func (s *Service) validateMapFinding(
+	ctx context.Context,
+	target string,
+	assetURL string,
+	mapURL string,
+	discoveredBy string,
+	sourceMappingRaw string,
+	jsSource string,
+) ([]model.Finding, error) {
+	validation, err := sourcemap.ValidateRemoteMap(ctx, s.httpClient, mapURL, s.cfg.MaxMapBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	return []model.Finding{{
+		Target:              target,
+		AssetURL:            assetURL,
+		MapURL:              validation.FinalURL,
+		RequestedMapURL:     mapURL,
+		DiscoveredBy:        discoveredBy,
+		JSSource:            jsSource,
+		SourceMappingURLRaw: sourceMappingRaw,
+		StatusCode:          validation.StatusCode,
+		ContentType:         validation.ContentType,
+		SourcesCount:        validation.SourcesCount,
+		NamesCount:          validation.NamesCount,
+		HasSourcesContent:   validation.HasSourcesContent,
+		File:                validation.File,
+	}}, nil
 }
