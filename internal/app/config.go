@@ -105,7 +105,8 @@ Examples:
 `)
 	}
 
-	if err := fs.Parse(args); err != nil {
+	// std flag stops at first positional; reorder so flags after targets still work.
+	if err := fs.Parse(reorderArgs(args)); err != nil {
 		return Config{}, err
 	}
 
@@ -173,6 +174,56 @@ Examples:
 	console.Scanf("targets=%d output=%s concurrency=%d", len(cfg.Targets), outLabel, cfg.TargetWorkers)
 
 	return cfg, nil
+}
+
+// reorderArgs moves flags before positionals so `tool targets.txt -o out` works
+// with the standard library flag parser.
+func reorderArgs(args []string) []string {
+	boolFlags := map[string]struct{}{
+		"-v": {}, "--v": {},
+		"-verbose": {}, "--verbose": {},
+		"-no-katana": {}, "--no-katana": {},
+		"-no-waymore": {}, "--no-waymore": {},
+		"-waymore-no-subs": {}, "--waymore-no-subs": {},
+		"-h": {}, "--h": {}, "-help": {}, "--help": {},
+	}
+
+	var flags []string
+	var positionals []string
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			positionals = append(positionals, args[i+1:]...)
+			break
+		}
+		if !strings.HasPrefix(arg, "-") || arg == "-" {
+			positionals = append(positionals, arg)
+			continue
+		}
+
+		// -flag=value
+		if strings.Contains(arg, "=") {
+			flags = append(flags, arg)
+			name := strings.SplitN(arg, "=", 2)[0]
+			// bool with explicit value still one token
+			_ = name
+			continue
+		}
+
+		flags = append(flags, arg)
+		name := arg
+		if _, isBool := boolFlags[name]; isBool {
+			continue
+		}
+		// Non-bool flag may take the next token as its value.
+		if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+			i++
+			flags = append(flags, args[i])
+		}
+	}
+
+	return append(flags, positionals...)
 }
 
 // ValidateCollectorConfig checks shared scan/collector settings.
