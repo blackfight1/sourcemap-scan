@@ -15,6 +15,7 @@ import (
 	"sourcemap-scan/internal/model"
 	"sourcemap-scan/internal/output"
 	"sourcemap-scan/internal/sourcemap"
+	"sourcemap-scan/internal/waymore"
 )
 
 type Service struct {
@@ -41,6 +42,17 @@ func (s *Service) Run(ctx context.Context) error {
 		return err
 	}
 	defer writer.Close()
+
+	// Prefetch waymore once per root domain (default), shared across all hosts under that root.
+	var waymoreCache map[string][]string
+	if !s.cfg.DisableWaymore && !s.cfg.WaymorePerHost {
+		waymoreCache = waymore.PrefetchByRoot(ctx, s.cfg, s.cfg.Targets)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
+
+	collectOpts := jscollect.CollectOptions{PrefetchedWaymore: waymoreCache}
 
 	jobs := make(chan string)
 	var workerWG sync.WaitGroup
@@ -102,7 +114,7 @@ func (s *Service) Run(ctx context.Context) error {
 					console.Dim(fmt.Sprintf("(remaining=%d)", total-current)),
 				)
 
-				if err := s.runTarget(ctx, writer, target); err != nil {
+				if err := s.runTarget(ctx, writer, target, collectOpts); err != nil {
 					activeCount.Add(-1)
 					failureCount.Add(1)
 					completed := successCount.Load() + failureCount.Load()
@@ -166,7 +178,7 @@ func (s *Service) Run(ctx context.Context) error {
 	return nil
 }
 
-func (s *Service) runTarget(ctx context.Context, writer *output.JSONLWriter, target string) (err error) {
+func (s *Service) runTarget(ctx context.Context, writer *output.JSONLWriter, target string, opts jscollect.CollectOptions) (err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			err = fmt.Errorf("panic while scanning target: %v", recovered)
@@ -189,7 +201,7 @@ func (s *Service) runTarget(ctx context.Context, writer *output.JSONLWriter, tar
 		})
 	}
 
-	assets, err := jscollect.Collect(targetCtx, s.cfg, target)
+	assets, err := jscollect.Collect(targetCtx, s.cfg, target, opts)
 	if err != nil {
 		return err
 	}

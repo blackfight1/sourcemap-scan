@@ -10,6 +10,7 @@ import (
 
 	"sourcemap-scan/internal/app"
 	"sourcemap-scan/internal/console"
+	"sourcemap-scan/internal/domain"
 	"sourcemap-scan/internal/katana"
 	"sourcemap-scan/internal/waymore"
 )
@@ -21,9 +22,15 @@ type Asset struct {
 	Source string // katana | waymore | both
 }
 
+// CollectOptions controls optional prefetched waymore results.
+type CollectOptions struct {
+	// PrefetchedWaymore is root-domain → URLs from a shared waymore run.
+	// When set and not per-host mode, used instead of running waymore per target.
+	PrefetchedWaymore map[string][]string
+}
+
 // Collect gathers JS/map URLs for a target using enabled collectors.
-// One collector failing does not fail the target if the other succeeds.
-func Collect(ctx context.Context, cfg app.Config, target string) ([]Asset, error) {
+func Collect(ctx context.Context, cfg app.Config, target string, opts CollectOptions) ([]Asset, error) {
 	type result struct {
 		source string
 		urls   []string
@@ -31,15 +38,17 @@ func Collect(ctx context.Context, cfg app.Config, target string) ([]Asset, error
 	}
 
 	var collectors []func(context.Context) result
+
 	if !cfg.DisableKatana {
 		collectors = append(collectors, func(ctx context.Context) result {
 			urls, err := katana.NewRunner(cfg, target).CollectJSURLs(ctx)
 			return result{source: "katana", urls: urls, err: err}
 		})
 	}
+
 	if !cfg.DisableWaymore {
 		collectors = append(collectors, func(ctx context.Context) result {
-			urls, err := waymore.NewRunner(cfg, target).CollectURLs(ctx)
+			urls, err := resolveWaymoreURLs(ctx, cfg, target, opts)
 			return result{source: "waymore", urls: urls, err: err}
 		})
 	}
@@ -59,7 +68,6 @@ func Collect(ctx context.Context, cfg app.Config, target string) ([]Asset, error
 	}
 	wg.Wait()
 
-	// sourceSets tracks which collectors saw each URL.
 	type meta struct {
 		sources map[string]struct{}
 		kind    string
@@ -105,6 +113,37 @@ func Collect(ctx context.Context, cfg app.Config, target string) ([]Asset, error
 	return assets, nil
 }
 
+func resolveWaymoreURLs(ctx context.Context, cfg app.Config, target string, opts CollectOptions) ([]string, error) {
+	host, err := domain.HostFromTarget(target)
+	if err != nil {
+		return nil, err
+	}
+
+	// Per-host mode: old behavior, waymore -i host -n
+	if cfg.WaymorePerHost {
+		return waymore.NewRunnerForDomain(cfg, host, true).CollectURLs(ctx)
+	}
+
+	// Root mode: use prefetched cache when available
+	root, err := domain.RootDomain(host)
+	if err != nil {
+		return nil, err
+	}
+
+	if opts.PrefetchedWaymore != nil {
+		all := opts.PrefetchedWaymore[root]
+		filtered := waymore.FilterByHost(all, host)
+		return filtered, nil
+	}
+
+	// Fallback: single-target run against root (include subs), then filter to this host
+	all, err := waymore.NewRunnerForDomain(cfg, root, false).CollectURLs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return waymore.FilterByHost(all, host), nil
+}
+
 func normalizeAssetURL(raw string) (string, string, bool) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -114,7 +153,6 @@ func normalizeAssetURL(raw string) (string, string, bool) {
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return "", "", false
 	}
-	// Drop fragment only; keep query (build hashes often live in query).
 	parsed.Fragment = ""
 	p := strings.ToLower(parsed.Path)
 	ext := strings.ToLower(path.Ext(p))

@@ -27,10 +27,12 @@ type Config struct {
 	KatanaExtraArgs   []string
 	DisableKatana     bool
 	WaymoreBin        string
-	WaymoreNoSubs     bool
-	WaymoreTimeout    time.Duration
-	WaymoreExtraArgs  []string
-	DisableWaymore    bool
+	// WaymorePerHost runs waymore once per target host with -n (slow for large lists).
+	// Default false: run waymore once per registrable root domain (e.g. dell.com).
+	WaymorePerHost   bool
+	WaymoreTimeout   time.Duration
+	WaymoreExtraArgs []string
+	DisableWaymore   bool
 	ScanWorkers       int
 	HTTPTimeout       time.Duration
 	TailBytes         int64
@@ -71,7 +73,7 @@ func ParseConfig(args []string) (Config, error) {
 	fs.IntVar(&cfg.KatanaRateLimit, "katana-rate-limit", 30, "katana rate limit")
 	fs.StringVar(&katanaExtraArgs, "katana-extra-args", "", "extra katana args")
 	fs.StringVar(&cfg.WaymoreBin, "waymore-bin", "waymore", "waymore binary")
-	fs.BoolVar(&cfg.WaymoreNoSubs, "waymore-no-subs", true, "waymore -n (no extra subs)")
+	fs.BoolVar(&cfg.WaymorePerHost, "waymore-per-host", false, "run waymore per host with -n (slow; default is once per root domain)")
 	fs.DurationVar(&cfg.WaymoreTimeout, "waymore-timeout", 20*time.Minute, "waymore timeout")
 	fs.StringVar(&waymoreExtraArgs, "waymore-extra-args", "", "extra waymore args")
 	fs.DurationVar(&cfg.HTTPTimeout, "http-timeout", 15*time.Second, "HTTP timeout")
@@ -94,8 +96,13 @@ Common flags:
   -c N        target concurrency (default: 3)
   -w N        asset workers per target (default: 10)
   -v          verbose
-  -no-katana  only waymore
-  -no-waymore only katana
+  -no-katana         only waymore
+  -no-waymore        only katana
+  -waymore-per-host  waymore each host separately (slow)
+
+Notes:
+  By default waymore runs once per root domain (dell.com), not each subdomain.
+  Katana still runs per host in your list.
 
 Examples:
   sourcemap-scan targets.txt
@@ -184,7 +191,7 @@ func reorderArgs(args []string) []string {
 		"-verbose": {}, "--verbose": {},
 		"-no-katana": {}, "--no-katana": {},
 		"-no-waymore": {}, "--no-waymore": {},
-		"-waymore-no-subs": {}, "--waymore-no-subs": {},
+		"-waymore-per-host": {}, "--waymore-per-host": {},
 		"-h": {}, "--h": {}, "-help": {}, "--help": {},
 	}
 

@@ -3,8 +3,22 @@
 抓 JS（**waymore + katana**）并识别 **sourcemap**。
 
 ```text
-waymore + katana → 合并 JS → 校验 .map → findings.jsonl
+waymore（按根域去重）+ katana（按子域） → 合并 JS → 校验 .map → findings.jsonl
 ```
+
+### waymore 默认策略（批量关键）
+
+列表里是 `aaa.dell.com`、`bbb.dell.com`、`ccc.apple.com` 时：
+
+| 步骤 | 行为 |
+|------|------|
+| waymore | 只对 **根域** 各跑一次：`dell.com`、`apple.com`（**不加** `-n`，一次拿全站历史） |
+| 分配 | 把结果按 hostname 分回列表里的子域 |
+| katana | 仍对每个子域各爬一次现网 |
+
+100 个 `*.dell.com` → waymore **1 次**，不是 100 次。
+
+旧行为（每个 host 单独 waymore + `-n`）：加 `-waymore-per-host`。
 
 ## 依赖
 
@@ -68,6 +82,7 @@ b.example.com
 | `-v` | 详细日志 | off |
 | `-no-waymore` | 关闭 waymore | |
 | `-no-katana` | 关闭 katana | |
+| `-waymore-per-host` | 每个子域单独跑 waymore（慢） | off |
 
 ## 输出示例
 
