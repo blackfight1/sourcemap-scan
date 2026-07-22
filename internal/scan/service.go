@@ -43,11 +43,17 @@ func NewServiceWithEmitter(cfg app.Config, onFinding func(context.Context, model
 func (s *Service) Run(ctx context.Context) error {
 	startedAt := time.Now()
 
-	writer, err := output.NewJSONLWriter(s.cfg.OutputPath)
+	writer, err := output.NewJSONLWriterMode(s.cfg.OutputPath, s.cfg.Resume)
 	if err != nil {
 		return err
 	}
 	defer writer.Close()
+
+	doneTracker, err := output.NewDoneTracker(s.cfg.DoneFile)
+	if err != nil {
+		return fmt.Errorf("opening done file: %w", err)
+	}
+	defer doneTracker.Close()
 
 	// Prefetch waymore once per root domain (default), shared across all hosts under that root.
 	var waymoreCache map[string][]string
@@ -92,6 +98,12 @@ func (s *Service) Run(ctx context.Context) error {
 		}
 		sampleSeen[mapURL] = struct{}{}
 		sampleMaps = append(sampleMaps, mapURL)
+	}
+
+	markDone := func(target string) {
+		if err := doneTracker.Mark(target); err != nil && s.cfg.Verbose {
+			console.Warnf("done-file write failed for %s: %v", target, err)
+		}
 	}
 
 	doneSummary := make(chan struct{})
@@ -149,6 +161,7 @@ func (s *Service) Run(ctx context.Context) error {
 				)
 
 				if err := s.runTarget(ctx, writer, target, collectOpts, recordFinding); err != nil {
+					markDone(target) // still mark so -resume will not retry forever
 					activeCount.Add(-1)
 					failureCount.Add(1)
 					completed := successCount.Load() + failureCount.Load()
@@ -161,6 +174,7 @@ func (s *Service) Run(ctx context.Context) error {
 					continue
 				}
 
+				markDone(target)
 				activeCount.Add(-1)
 				successCount.Add(1)
 				completed := successCount.Load() + failureCount.Load()

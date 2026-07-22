@@ -63,6 +63,11 @@ sourcemap-scan targets.txt -o -
 # 飞书总结（需先配置 webhook，见下方；未配置则跳过）
 sourcemap-scan targets.txt
 sourcemap-scan targets.txt -no-feishu
+
+# 单站 katana 最多 5 分钟（默认）；断点续跑
+sourcemap-scan targets.txt -o findings.jsonl -c 8 -katana-timeout 5m
+# Ctrl+C 后继续（跳过 findings.jsonl.done 里已完成的）
+sourcemap-scan targets.txt -o findings.jsonl -c 8 -resume
 ```
 
 默认输出 **`findings.jsonl`**，目标并发 **3**。
@@ -99,6 +104,9 @@ b.example.com
 | `-no-waymore` | 关闭 waymore | |
 | `-no-katana` | 关闭 katana | |
 | `-waymore-per-host` | 每个子域单独跑 waymore（慢） | off |
+| `-katana-timeout` | 单站 katana 最长爬取时间（`0`=不限） | `5m` |
+| `-resume` | 跳过 `<output>.done` 里已完成的目标，追加 findings | off |
+| `-done-file` | 已完成目标列表（默认 `<output>.done`） | |
 | `-feishu-webhook` | 扫描完成飞书 webhook | off（或 env / `.feishu_webhook`） |
 | `-no-feishu` | 关闭飞书总结 | off |
 

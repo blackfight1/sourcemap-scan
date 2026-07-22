@@ -16,13 +16,27 @@ type JSONLWriter struct {
 }
 
 func NewJSONLWriter(outputPath string) (*JSONLWriter, error) {
+	return NewJSONLWriterMode(outputPath, false)
+}
+
+// NewJSONLWriterMode opens the findings file. When append is true, existing
+// content is preserved (used with -resume).
+func NewJSONLWriterMode(outputPath string, appendMode bool) (*JSONLWriter, error) {
 	if outputPath == "" {
 		return &JSONLWriter{
 			enc: json.NewEncoder(os.Stdout),
 		}, nil
 	}
 
-	file, err := os.Create(outputPath)
+	var (
+		file *os.File
+		err  error
+	)
+	if appendMode {
+		file, err = os.OpenFile(outputPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	} else {
+		file, err = os.Create(outputPath)
+	}
 	if err != nil {
 		return nil, err
 	}
